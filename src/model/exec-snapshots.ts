@@ -45,6 +45,13 @@ export const STALE_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 // hourly pass bounds the directory without measurable cost.
 export const SNAPSHOT_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
+// WHY a budget at all: the opportunistic pass runs inside the first step's
+// verification, before that step's watchdog starts. A machine carrying the
+// pre-#303 backlog (23k dirs, 147 GB) would otherwise block that step until
+// the whole backlog was deleted. Two seconds per pass bounds what one step
+// pays; an exhausted pass hands the rest to the next verification.
+export const OPPORTUNISTIC_SWEEP_BUDGET_MS = 2000;
+
 export function defaultExecSnapshotBase(): string {
   return path.join(tmpdir(), EXEC_SNAPSHOT_DIRNAME);
 }
@@ -223,14 +230,25 @@ export interface SnapshotSweepOptions {
   readonly currentUid?: number;
   // Classify and count only; remove nothing.
   readonly dryRun?: boolean;
+  // Wall-clock budget for the whole pass, checked before each entry; once
+  // spent, no new entry is taken. Unset means unbounded (`pr-hero gc`).
+  readonly budgetMs?: number;
+  // Clock for the budget only (never for ages); injectable for tests.
+  readonly clock?: () => number;
+  // Size each removed dir (default true). Sizing is a readdir plus an lstat
+  // per file; the opportunistic pass skips it, only the gc report needs it.
+  readonly countBytes?: boolean;
 }
 
 export interface SnapshotSweepReport {
   // In a dry run: what would be removed, and its size.
   readonly removed: number;
+  // 0 when `countBytes` is false.
   readonly removedBytes: number;
   readonly kept: number;
   readonly failed: number;
+  // Entries left untouched because the budget ran out.
+  readonly unprocessed: number;
 }
 
 // Best-effort size of a snapshot dir: its regular files, one level, via lstat.
@@ -251,6 +269,9 @@ export async function sweepStaleExecutionSnapshots(
   options: SnapshotSweepOptions = {},
 ): Promise<SnapshotSweepReport> {
   const base = options.snapshotBase ?? defaultExecSnapshotBase();
+  const clock = options.clock ?? (() => performance.now());
+  const startedAt = clock();
+  const countBytes = options.countBytes ?? true;
   const policy: SnapshotSweepPolicy = {
     nowMs: options.nowMs ?? Date.now(),
     maxAgeMs: options.maxAgeMs ?? STALE_SNAPSHOT_MAX_AGE_MS,
@@ -262,13 +283,25 @@ export async function sweepStaleExecutionSnapshots(
     names = await readdir(base);
   } catch {
     // No base yet (first run) or unreadable: nothing to sweep.
-    return { removed: 0, removedBytes: 0, kept: 0, failed: 0 };
+    return { removed: 0, removedBytes: 0, kept: 0, failed: 0, unprocessed: 0 };
   }
   let removed = 0;
   let removedBytes = 0;
   let kept = 0;
   let failed = 0;
-  for (const name of names) {
+  for (const [index, name] of names.entries()) {
+    if (
+      options.budgetMs !== undefined &&
+      clock() - startedAt >= options.budgetMs
+    ) {
+      return {
+        removed,
+        removedBytes,
+        kept,
+        failed,
+        unprocessed: names.length - index,
+      };
+    }
     const entryPath = path.join(base, name);
     let stats: Stats;
     try {
@@ -297,7 +330,7 @@ export async function sweepStaleExecutionSnapshots(
       kept++;
       continue;
     }
-    const bytes = await snapshotDirBytes(entryPath);
+    const bytes = countBytes ? await snapshotDirBytes(entryPath) : 0;
     if (options.dryRun) {
       removed++;
       removedBytes += bytes;
@@ -311,27 +344,47 @@ export async function sweepStaleExecutionSnapshots(
       failed++;
     }
   }
-  return { removed, removedBytes, kept, failed };
+  return { removed, removedBytes, kept, failed, unprocessed: 0 };
 }
 
 const lastSweepAtMsByBase = new Map<string, number>();
 
 // The opportunistic trigger `verifyExecutableAuthority` runs before creating a
 // snapshot. Rate-limited per resolved base (production has exactly one, so
-// this is "once per hour per process"); the timestamp is taken BEFORE the
-// sweep so concurrent verifications in the same process do not all sweep.
-// Never throws: a sweep problem must not fail or delay-fail verification.
+// this is "once per hour per process"); the claim is taken BEFORE the sweep
+// so concurrent verifications in the same process do not all sweep.
+// Time-bounded (OPPORTUNISTIC_SWEEP_BUDGET_MS) and byte-blind: it only has to
+// make progress. A pass that runs out of budget gives the claim back, so the
+// NEXT verification continues the backlog instead of waiting an hour; a pass
+// that finishes keeps the claim. Returns the report, or undefined when the
+// rate limit skipped the pass. Never throws: a sweep problem must not fail or
+// delay-fail verification.
 export async function sweepExecutionSnapshotsOpportunistically(
   snapshotBase: string,
   nowMs: number = Date.now(),
-): Promise<void> {
+  budget: {
+    readonly budgetMs?: number;
+    readonly clock?: () => number;
+  } = {},
+): Promise<SnapshotSweepReport | undefined> {
   const key = path.resolve(snapshotBase);
   const last = lastSweepAtMsByBase.get(key);
-  if (last !== undefined && nowMs - last < SNAPSHOT_SWEEP_INTERVAL_MS) return;
+  if (last !== undefined && nowMs - last < SNAPSHOT_SWEEP_INTERVAL_MS) {
+    return undefined;
+  }
   lastSweepAtMsByBase.set(key, nowMs);
   try {
-    await sweepStaleExecutionSnapshots({ snapshotBase: key, nowMs });
+    const report = await sweepStaleExecutionSnapshots({
+      snapshotBase: key,
+      nowMs,
+      budgetMs: budget.budgetMs ?? OPPORTUNISTIC_SWEEP_BUDGET_MS,
+      clock: budget.clock,
+      countBytes: false,
+    });
+    if (report.unprocessed > 0) lastSweepAtMsByBase.delete(key);
+    return report;
   } catch {
     // Best-effort by contract.
+    return undefined;
   }
 }

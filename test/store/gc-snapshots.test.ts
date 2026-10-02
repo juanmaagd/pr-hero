@@ -104,6 +104,7 @@ describe("renderSnapshotGcLine", () => {
     removed: 4,
     kept: 2,
     failed: 0,
+    unprocessed: 0,
     ...overrides,
   });
 

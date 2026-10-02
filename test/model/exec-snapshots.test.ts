@@ -17,6 +17,7 @@ import path from "node:path";
 import {
   classifySnapshotEntry,
   defaultExecSnapshotBase,
+  OPPORTUNISTIC_SWEEP_BUDGET_MS,
   releaseExecutionSnapshot,
   type SnapshotEntryFacts,
   type SnapshotSweepPolicy,
@@ -295,6 +296,7 @@ describe("sweepStaleExecutionSnapshots", () => {
       removedBytes: 1500,
       kept: 4,
       failed: 0,
+      unprocessed: 0,
     });
     expect((await readdir(base)).sort()).toEqual(
       [
@@ -326,6 +328,7 @@ describe("sweepStaleExecutionSnapshots", () => {
       removedBytes: 1500,
       kept: 4,
       failed: 0,
+      unprocessed: 0,
     });
     expect((await readdir(base)).sort()).toEqual(before);
   });
@@ -342,7 +345,13 @@ describe("sweepStaleExecutionSnapshots", () => {
       currentUid: currentUid + 1,
     });
 
-    expect(report).toEqual({ removed: 0, removedBytes: 0, kept: 6, failed: 0 });
+    expect(report).toEqual({
+      removed: 0,
+      removedBytes: 0,
+      kept: 6,
+      failed: 0,
+      unprocessed: 0,
+    });
     expect((await readdir(base)).sort()).toEqual(before);
   });
 
@@ -380,18 +389,53 @@ describe("sweepStaleExecutionSnapshots", () => {
         removedBytes: 0,
         kept: 1,
         failed: 0,
+        unprocessed: 0,
       });
       expect(existsSync(rootOwned)).toBe(true);
       expect(existsSync(deadOwner)).toBe(false);
     },
   );
 
+  test("a spent budget stops the pass and reports the entries it never took", async () => {
+    const base = path.join(tempDir, "snaps");
+    const stale = await Promise.all(
+      [1, 2, 3, 4, 5].map(() =>
+        makeEntry(base, snapshotName(undefined), { mtimeMs: staleMs }),
+      ),
+    );
+    // Time advances one unit per removed entry, however often the sweep
+    // reads the clock: a budget of 2 is spent after exactly two removals.
+    const clock = () => stale.filter((dir) => !existsSync(dir)).length;
+
+    const report = await sweepStaleExecutionSnapshots({
+      snapshotBase: base,
+      nowMs,
+      budgetMs: 2,
+      clock,
+    });
+
+    expect(report).toEqual({
+      removed: 2,
+      removedBytes: 0,
+      kept: 0,
+      failed: 0,
+      unprocessed: 3,
+    });
+    expect(stale.filter((dir) => existsSync(dir))).toHaveLength(3);
+  });
+
   test("a missing base is an empty sweep, not an error", async () => {
     expect(
       await sweepStaleExecutionSnapshots({
         snapshotBase: path.join(tempDir, "never-created"),
       }),
-    ).toEqual({ removed: 0, removedBytes: 0, kept: 0, failed: 0 });
+    ).toEqual({
+      removed: 0,
+      removedBytes: 0,
+      kept: 0,
+      failed: 0,
+      unprocessed: 0,
+    });
   });
 });
 
@@ -436,6 +480,54 @@ describe("opportunistic sweep", () => {
   // t0 and stale at t0 + 30 min, so it survives only if the second, concurrent
   // call skipped its sweep — i.e. the first call claimed the base before its
   // first await, and exactly one sweep ran.
+  test("an exhausted pass hands the backlog to the next call instead of waiting an hour", async () => {
+    const base = path.join(tempDir, "snaps");
+    const t0 = Date.now();
+    const stale = await Promise.all(
+      [1, 2, 3].map(() =>
+        makeEntry(base, snapshotName(undefined), {
+          mtimeMs: t0 - STALE_SNAPSHOT_MAX_AGE_MS - HOUR_MS,
+        }),
+      ),
+    );
+    // Each removal costs a whole default budget, so the production budget
+    // (no override) ends the first pass after exactly one entry.
+    const clock = () =>
+      stale.filter((dir) => !existsSync(dir)).length *
+      OPPORTUNISTIC_SWEEP_BUDGET_MS;
+
+    const first = await sweepExecutionSnapshotsOpportunistically(base, t0, {
+      clock,
+    });
+    const next = await sweepExecutionSnapshotsOpportunistically(
+      base,
+      t0 + 60_000,
+    );
+
+    expect(first?.unprocessed).toBe(2);
+    expect(next?.removed).toBe(2);
+    expect(stale.filter((dir) => existsSync(dir))).toEqual([]);
+  });
+
+  test("never sizes what it removes", async () => {
+    const base = path.join(tempDir, "snaps");
+    const t0 = Date.now();
+    await makeEntry(base, snapshotName(undefined), {
+      bytes: 2048,
+      mtimeMs: t0 - STALE_SNAPSHOT_MAX_AGE_MS - HOUR_MS,
+    });
+
+    const report = await sweepExecutionSnapshotsOpportunistically(base, t0);
+
+    expect(report).toEqual({
+      removed: 1,
+      removedBytes: 0,
+      kept: 0,
+      failed: 0,
+      unprocessed: 0,
+    });
+  });
+
   test("concurrent triggers on one base run exactly one sweep", async () => {
     const base = path.join(tempDir, "snaps");
     const t0 = Date.now();

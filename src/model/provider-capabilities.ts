@@ -250,8 +250,10 @@ export async function verifyExecutableAuthority(
   // 7. TOCTOU Defense: Create private verified execution snapshot bound to verified bytes
   const snapBase = options.snapshotDir ?? defaultExecSnapshotBase();
   // #303: collect what crashed processes left behind before adding to it.
-  // Rate-limited and best-effort inside; awaited so a test's cleanup never
-  // races a sweep still running in the background.
+  // Rate-limited, time-bounded (OPPORTUNISTIC_SWEEP_BUDGET_MS) and
+  // best-effort inside, so this step pays at most the budget even on a large
+  // backlog; awaited so a test's cleanup never races a sweep still running in
+  // the background.
   await sweepExecutionSnapshotsOpportunistically(snapBase);
   // The pid lets a later sweep tell a dead owner's directory from a live one;
   // the per-call uuid stays — it is what defeats a pre-planted path.
