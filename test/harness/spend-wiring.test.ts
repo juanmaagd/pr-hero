@@ -107,6 +107,7 @@ async function makeStep(
     tools: [],
     mcpConfigPath: path.join(dir, "mcp.json"),
     model: "claude-sonnet-4-5",
+    effort: "high",
     cwd: dir,
     outPath: path.join(dir, `${name}.out.json`),
     timeoutMs: 5_000,

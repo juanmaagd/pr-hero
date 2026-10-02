@@ -1,3 +1,4 @@
+import type { Effort } from "#model/catalog";
 import type {
   CredentialKind,
   ExecutableAllowlistEntry,
@@ -53,6 +54,11 @@ export interface TransportRequest {
   // direct routes this is the logical alias (sonnet|opus|haiku); configured
   // routes use route.modelSnapshot instead.
   readonly executionModel: string;
+  // The effort the engine asked for (StepSpec.effort), always present. Only
+  // the Claude Code transport can APPLY it (`--effort`); a backend that cannot
+  // still receives it so the evidence can record intent beside the fact that
+  // it was not applied.
+  readonly effort: Effort;
   readonly systemPromptPath: string;
   readonly systemPromptSha256: string;
   readonly userPrompt: string;

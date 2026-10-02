@@ -364,6 +364,15 @@ export async function freezeAttemptEvidenceIdentity(
           // was ever offered tools, and a digest cannot answer it. Additive:
           // the hash stays, and the plan's readers compare fields by name.
           toolNames: [...request.tools],
+          // #299: the effort the engine REQUESTED, and whether this backend
+          // could apply it. The CLI's implicit default (medium on the 5.5
+          // family) is what the artifacts could not show before. OpenCode has
+          // no `--effort`, so there the level is intent only, and
+          // `effortApplied: false` keeps a reader from taking it as a fact
+          // about the run. Additive, and deliberately NOT in `identity` or the
+          // route fingerprint: those are compared across runs by the lab.
+          effort: request.effort,
+          effortApplied: request.route.backend === "claude-code",
           ...frozen,
         };
         await mkdir(path.dirname(file), { recursive: true });

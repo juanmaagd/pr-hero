@@ -38,7 +38,7 @@ Load when the user asks to:
 | Credential: Claude | **`CLAUDE_CODE_OAUTH_TOKEN`** — subscription (`claude setup-token` only, NOT keychain). **`ANTHROPIC_API_KEY`** — pay-as-you-go. |
 | Credential: OpenCode | Read `references/opencode-ci.md`. Secret + variable. Any one of the three secrets starts the review job. |
 | openai API key in CI | **Refuse.** openai → ChatGPT OAuth mapping; `type:"api"` is refused. Use a non-openai API token (tested: deepseek). |
-| Hunters OpenCode / refuter Claude | DATA cannot. Routing is by logical model, not role; hunters and refuter both declare `opus`, summarizer `haiku`, so one `opus` mapping moves both. Map only `opus`: the unmapped `haiku` summarizer falls through to the Claude CLI (current behavior), so keep a Claude secret. OpenCode-only (no Claude secret): use a `default` route or map `opus` and `haiku`; a `sonnet`-only mapping moves nothing (`references/opencode-ci.md`). |
+| Hunters OpenCode / refuter Claude | DATA can: map only `sonnet`. Routing is by logical model, not role; hunters declare `sonnet`, refuter `opus`, summarizer `haiku`. The unmapped `opus` refuter falls through to the Claude CLI (current behavior), so keep a Claude secret. OpenCode-only (no Claude secret): use a `default` route or map all three aliases, never `sonnet` alone (`references/opencode-ci.md`). |
 | Mixed OpenCode providers in one run | Out of scope (#195). One OpenCode provider per run. Mixed `claude-code` + one OpenCode provider is legal. |
 | OpenCode CLI pin | Action installs **1.18.30** iff `opencode-auth != ''` OR routing contains `opencode`. Never `latest`. |
 | Fork PRs | Skip unchanged. Credentials union is Anthropic **or** Claude OAuth **or** `OPENCODE_AUTH_JSON`. Review `if` never reads `secrets`. |

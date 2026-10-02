@@ -252,6 +252,7 @@ describe("StepExecutionHarness settlement integration", () => {
       tools: [],
       mcpConfigPath: path.join(dir, "mcp.json"),
       model: "claude-sonnet-4-5",
+      effort: "high",
       cwd: dir,
       outPath: path.join(dir, "hunter-reliability.json"),
       timeoutMs: 5_000,

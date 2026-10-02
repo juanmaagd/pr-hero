@@ -114,6 +114,11 @@ const REFUTER_SOURCE_PATH = path.resolve(
 // frontmatter does NOT move this constant, and a probe run on a model
 // production no longer uses proves nothing about production.
 const REFUTER_MODEL = "opus";
+// Effort is deliberately NOT pinned beside it: the fixture carries the refuter
+// prompt verbatim, so the step runs at the `effort:` the frontmatter declares
+// (`high`, #299), i.e. the production level. A pass at a lower level is not
+// evidence for it: 16/16 at `medium` did not predict that `medium` refutes a
+// real, known blocker on actual findings (3 of 4 verdicts on pr-1858).
 
 // One hunter (never spawned — see the runner below) and one refuter, which is
 // the minimum the pipeline accepts. The hunter is non-parity, so the

@@ -5,6 +5,7 @@
 // the {{PRIORS}}/{{GOTCHAS}} templating the orchestrator prose used to do at
 // spawn time moves into the driver (renderAgentBody).
 
+import { EFFORT_LEVELS, type Effort, isEffort } from "#model/catalog";
 import { wrapBlock } from "./boundary";
 
 // Fixed order — the lab's promptSetFingerprint hashes the concatenated files
@@ -23,6 +24,9 @@ export interface ParsedAgent {
   description: string;
   tools: string[];
   model?: string;
+  // Optional `effort:` key. Absent means "use the engine's per-role default"
+  // (defaultEffortForRole), never "use the CLI's implicit one".
+  effort?: Effort;
   // Everything below the frontmatter block — the step's system prompt.
   body: string;
 }
@@ -48,17 +52,37 @@ export function parseAgentSource(raw: string): ParsedAgent {
   if (!name) throw new Error("agent file has no name field");
   const tools = field("tools");
   const model = field("model");
+  const effort = field("effort");
+  // Present-but-empty is malformed, not an omission (unlike `model:`): an
+  // `effort:` line is someone choosing a level, and silently dropping it would
+  // put the step on the engine default while the file reads as overridden.
+  if (effort !== undefined && !isEffort(effort)) {
+    throw new Error(
+      `agent file declares effort "${effort}"; expected one of ${EFFORT_LEVELS.join(", ")}`,
+    );
+  }
   return {
     name,
     description: field("description") ?? name,
     tools: tools ? tools.split(",").map((t) => t.trim()) : [],
     ...(model ? { model } : {}),
+    ...(effort === undefined ? {} : { effort }),
     body: body.trim(),
   };
 }
 
 export async function parseAgentFile(filePath: string): Promise<ParsedAgent> {
-  return parseAgentSource(await Bun.file(filePath).text());
+  const raw = await Bun.file(filePath).text();
+  try {
+    return parseAgentSource(raw);
+  } catch (error) {
+    // parseAgentSource sees bytes, not a path, so the file is named here: a
+    // preflight failure that does not say WHICH of six prompt files is wrong
+    // sends the reader grepping.
+    throw new Error(
+      `${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
 
 export interface SuspicionPrior {

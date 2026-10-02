@@ -4,6 +4,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { defaultEffortForRole } from "#model/catalog";
 import { selectBoundaryNonce } from "#review/boundary";
 import { parseAgentFile } from "#review/prompt-set";
 import { scoutPrompt, validateScoutLeads } from "#review/scout";
@@ -78,6 +79,8 @@ const result = await runner.run({
   tools: scoutMode ? [] : ["Read"],
   mcpConfigPath,
   model: "sonnet",
+  // Explicit, like every step: the transport refuses a request without one.
+  effort: defaultEffortForRole(scoutMode ? "scout" : "other"),
   cwd: dir,
   outPath: path.join(dir, "out.json"),
   timeoutMs: scoutMode ? 15 * 60 * 1000 : 5 * 60 * 1000,

@@ -761,7 +761,7 @@ describe("doctor tri-state evaluation", () => {
     test("doctor route plan constructs an OpenCode binding from routing", () => {
       const open = buildDoctorRoutePlan({
         mappings: {
-          [aliasCanonical("opus")]: {
+          [aliasCanonical("sonnet")]: {
             backend: "opencode",
             provider: "openai",
             modelFamily: "gpt-4o",
@@ -775,26 +775,6 @@ describe("doctor tri-state evaluation", () => {
         modelFamily: "gpt-4o",
         modelVariant: "high",
       });
-    });
-
-    // The bundled hunters declare opus (#299, 2026-10-02), so a routing that
-    // maps only opus must move the doctor's hunter probe too. A hunter probed
-    // on sonnet would report readiness for a route no hunter runs on.
-    test("doctor route plan probes the hunter on the opus route", () => {
-      const plan = buildDoctorRoutePlan({
-        mappings: {
-          [aliasCanonical("opus")]: {
-            backend: "opencode",
-            provider: "deepseek",
-            modelFamily: "deepseek-v4-pro",
-            modelSnapshot: "deepseek-v4-pro",
-          },
-        },
-      });
-      const hunter = plan.steps.find(
-        (step) => step.stepKey === "hunter-reliability",
-      );
-      expect(hunter?.route.backend).toBe("opencode");
     });
   });
 

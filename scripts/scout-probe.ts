@@ -62,6 +62,7 @@
 import { mkdir, readdir } from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_LINE_WINDOW, normalizePath } from "#compare/compare";
+import { defaultEffortForRole } from "#model/catalog";
 import { selectBoundaryNonce } from "#review/boundary";
 import { extractJsonObject } from "#review/drafts";
 import { parseAgentFile } from "#review/prompt-set";
@@ -474,6 +475,7 @@ async function runOnce(input: PrInput, replicate: number): Promise<RunRecord> {
     tools: agent.tools,
     mcpConfigPath,
     model,
+    effort: agent.effort ?? defaultEffortForRole("scout"),
     cwd: scratchDir,
     outPath,
     // §3.5 mechanism 4: one attempt, a bounded watchdog (`--timeout`, default

@@ -166,6 +166,7 @@ async function realAttemptFixture(
     prompt: "review",
     tools: [],
     model: "sonnet",
+    effort: "high" as const,
     route,
     cwd: root,
     outPath: path.join(root, "out.json"),

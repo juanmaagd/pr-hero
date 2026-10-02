@@ -1553,6 +1553,7 @@ export class StepExecutionHarness implements StepRunner {
         sessionId: `${step.name}-${Date.now()}-${attempts}`,
         attempt: attempts,
         executionModel: step.model,
+        effort: step.effort,
         route:
           step.route ??
           (transport.defaultRoute

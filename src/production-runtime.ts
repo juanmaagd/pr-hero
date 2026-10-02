@@ -803,7 +803,7 @@ export function buildDoctorRoutePlan(
 ): ResolvedRoutePlan {
   return buildResolvedRoutePlan({
     agents: [
-      { key: "reliability", role: "hunter", model: "opus" },
+      { key: "reliability", role: "hunter", model: "sonnet" },
       { key: "refuter", role: "refuter", model: "opus" },
     ],
     ...(routingConfig === undefined ? {} : { routingConfig }),

@@ -222,6 +222,7 @@ for (const selector of ["relative", "absolute", "git-C"] as const)
           mcpConfigPath: join(root, "mcp.json"),
           tools: ["Read"],
           model: "model",
+          effort: "high",
           route: {
             backend: "opencode",
             provider: "openai",

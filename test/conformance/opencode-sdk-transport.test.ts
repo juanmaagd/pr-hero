@@ -95,6 +95,7 @@ function makeRequest(
       modelSnapshot: "gpt-test-snapshot",
     },
     executionModel: "gpt-test-snapshot",
+    effort: "high",
     systemPromptPath: "/tmp/pr-hero-test/system.md",
     systemPromptSha256: "deadbeef",
     userPrompt: "review this",

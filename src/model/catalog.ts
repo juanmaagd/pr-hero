@@ -183,6 +183,67 @@ export function reverseAliasForCanonical(
   return alias === undefined ? undefined : (alias as ModelAlias);
 }
 
+// The Claude Code CLI's `--effort` vocabulary, closed. Lives beside
+// `ModelAlias` because the pair is what a step is asked to run as: a model and
+// how hard it works. An unknown level must fail at the frontmatter seam, not
+// reach the CLI, which would reject it (or ignore it) after the run is paid for.
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = (typeof EFFORT_LEVELS)[number];
+
+export function isEffort(value: string): value is Effort {
+  return (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
+// Which kind of step is being built. Wider than `AgentSpec.role` on purpose:
+// the summarizer, scout and rereview verifier are steps too, and each needs a
+// resolved level, not an implicit one. `other` is for ad hoc steps (judges,
+// probes) built outside the pipeline.
+export type StepRole =
+  | "hunter"
+  | "refuter"
+  | "summarizer"
+  | "scout"
+  | "verifier"
+  | "other";
+
+// THE per-role effort table, and the only place a default is chosen. It is the
+// fallback when a prompt's frontmatter omits `effort:`, so a custom or lab
+// prompt set still runs at an EXPLICIT level.
+//
+// WHY the engine owns this at all (#299, 2026-10-02): pr-hero never passed
+// `--effort`, so every step ran at the CLI's implicit default, which is `high`
+// except on Sonnet 5.5 and Opus 5.5, where it is `medium`
+// (https://code.claude.com/docs/en/model-config). When the `sonnet` alias moved
+// to 5.5 the hunters silently dropped a level and stopped exploring.
+//
+// Measured on musive pr-1858 (Sonnet 5.5, 4 hunters x 2 replicates):
+//   medium 0/8 runs with findings (0.5 min), high 6/8 (1.5 min),
+//   xhigh 8/8 and all 4 known bugs (4.5 min), max 7/8 (19 min).
+//   - hunter  xhigh: the cheapest level that found everything.
+//   - refuter high: refuter-probe 16/16 at medium was NOT sufficient. On the
+//     real pr-1858 xhigh findings the Opus refuter at medium returned
+//     `refuted` on the pre-labeled known `updateProject` BLOCKER in 3 of 4
+//     verdicts, which deletes it; at high it was `downgraded-latent` (kept, as
+//     advisory) in 3 of 4 and refuted in 1 of 4. The other 5 findings got the
+//     same verdicts at both levels, and the original Sonnet-5-at-high refuter
+//     corroborated that finding. The cost is a refuter leg of ~140s instead of
+//     ~90s. The probe plants claims with a known verdict; it cannot see a
+//     real finding being talked out of existence, which is what this gate did.
+//   - everything else high: unmeasured, so it keeps what every model ran at
+//     before the 5.5 family, i.e. the behavior those roles were validated under.
+const ROLE_EFFORT: Readonly<Record<StepRole, Effort>> = Object.freeze({
+  hunter: "xhigh",
+  refuter: "high",
+  summarizer: "high",
+  scout: "high",
+  verifier: "high",
+  other: "high",
+});
+
+export function defaultEffortForRole(role: StepRole): Effort {
+  return ROLE_EFFORT[role];
+}
+
 export function providerCatalog(
   provider: keyof typeof PROVIDER_CATALOGS,
 ): ProviderModelCatalog {

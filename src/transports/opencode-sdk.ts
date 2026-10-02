@@ -1032,6 +1032,14 @@ export class OpenCodeSdkTransport implements ProviderTransport {
         });
       });
 
+      // `request.effort` is deliberately NOT forwarded. Effort is a Claude Code
+      // CLI control (`claude --effort`, #299); OpenCode's closest equivalent is
+      // per-model reasoning variants, whose levels differ by provider and are
+      // not the same scale, so mapping one onto the other here would invent a
+      // meaning. That is a separate decision. What this backend does instead is
+      // honest about it: the request plan still records the level the engine
+      // asked for, with `effortApplied: false` (attempt-evidence.ts), and
+      // pipeline.json says `effort_applied: false`.
       createPromise = this.client.createSession({
         correlation: { sessionId: request.sessionId, attempt: request.attempt },
         signal: operation.signal,

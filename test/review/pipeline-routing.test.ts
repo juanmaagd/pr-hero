@@ -384,6 +384,10 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       expect(hunterMeta.route.backend).toBe("claude-code");
       expect(hunterMeta.route.provider).toBe("anthropic");
       expect(hunterMeta.route.modelFamily).toBe("sonnet");
+      // #299: the requested effort rides beside the route, and on the Claude
+      // backend the CLI flag exists, so it is applied.
+      expect(hunterMeta.effort).toBe("xhigh");
+      expect(hunterMeta.effort_applied).toBe(true);
     } finally {
       await env.cleanup();
     }
@@ -532,6 +536,10 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       );
       expect(hunterMeta).toBeDefined();
       expect(hunterMeta.model).toBe("gpt-4o");
+      // OpenCode has no `--effort`: the level is recorded as REQUESTED and the
+      // artifact says outright that this backend did not apply it.
+      expect(hunterMeta.effort).toBe("xhigh");
+      expect(hunterMeta.effort_applied).toBe(false);
     } finally {
       await env.cleanup();
     }
@@ -627,6 +635,14 @@ describe("Pipeline Model Routing & Provenance (D2 PR3)", () => {
       expect(pipelineJson.routePlan).toBeUndefined();
       expect(pipelineJson.route_plan).toBeUndefined();
       expect(parsePipelineMeta(JSON.stringify(pipelineJson))).not.toBeNull();
+      // #299: the legacy shape still carries the requested effort, but with no
+      // route the backend is not recorded, so `effort_applied` is ABSENT rather
+      // than guessed.
+      const hunterMeta = pipelineJson.steps.find(
+        (s: { name: string }) => s.name === "hunter-reliability",
+      );
+      expect(hunterMeta.effort).toBe("xhigh");
+      expect(hunterMeta).not.toHaveProperty("effort_applied");
     } finally {
       await env.cleanup();
     }

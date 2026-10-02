@@ -208,7 +208,11 @@ const BUNDLED_SUMMARIZER_PROMPT = path.join(
 const HUNTER_TOOLS = "Read, Grep, Glob, mcp__codegraph__codegraph_explore";
 
 async function makeAgentsDir(
-  options: { model?: string } = {},
+  options: {
+    model?: string;
+    hunterEffort?: string;
+    refuterEffort?: string;
+  } = {},
 ): Promise<string> {
   const dir = await mkdtemp(path.join(tmpdir(), "pr-hero-agents-"));
   const model = options.model ?? "sonnet";
@@ -218,6 +222,7 @@ async function makeAgentsDir(
       `name: ${name}`,
       `description: ${name} hunter`,
       `model: ${model}`,
+      ...(options.hunterEffort ? [`effort: ${options.hunterEffort}`] : []),
       `tools: ${HUNTER_TOOLS}`,
       "---",
       "",
@@ -248,6 +253,7 @@ async function makeAgentsDir(
       "name: review-refuter",
       "description: detached refuter",
       `model: ${model}`,
+      ...(options.refuterEffort ? [`effort: ${options.refuterEffort}`] : []),
       "tools: Read, Grep, Glob",
       "---",
       "",
@@ -864,6 +870,128 @@ async function readPlan(runDir: string): Promise<Record<string, unknown>> {
     await Bun.file(path.join(runDir, "pipeline.json")).text(),
   ) as Record<string, unknown>;
 }
+
+// #299 (2026-10-02): pr-hero never passed `--effort`, so every step ran at the
+// CLI's implicit default, which is `high` except on the 5.5 family (`medium`).
+// When the `sonnet` alias moved to 5.5 the hunters silently dropped a level and
+// stopped exploring: 0 of 8 runs on pr-1858 found anything at `medium`, 8 of 8
+// at `xhigh`. The engine now owns the level and puts it on EVERY StepSpec.
+describe("engine-owned effort", () => {
+  const BUNDLED_SCOUT = path.join(
+    import.meta.dir,
+    "..",
+    "..",
+    "prompts",
+    "scout.md",
+  );
+  const refuterScript: StepScript = {
+    ...HUNTERS_OK,
+    "hunter-reliability": (spec) =>
+      ok(spec, {
+        findings: [
+          draft({ severity: "BLOCKER", evidence_class: "deterministic" }),
+        ],
+      }),
+    refuter: (spec) =>
+      ok(spec, {
+        results: [
+          { finding_id: "F001", outcome: "corroborated", proof_refs: [] },
+        ],
+      } satisfies RefuterResult),
+  };
+  const effortOf = (runner: FakeStepRunner, name: string) =>
+    runner.specs.find((s) => s.name === name)?.effort;
+
+  test("a frontmatter with no `effort:` gets the per-role default on every step", async () => {
+    const runner = new FakeStepRunner({
+      ...refuterScript,
+      summarizer: (spec) => ok(spec, summary()),
+      scout: (spec) => ok(spec, []),
+    });
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+      scout: { promptPath: BUNDLED_SCOUT },
+    });
+
+    await runPipeline(input, { runner });
+
+    expect(effortOf(runner, "hunter-reliability")).toBe("xhigh");
+    expect(effortOf(runner, "hunter-resilience")).toBe("xhigh");
+    expect(effortOf(runner, "refuter-F001")).toBe("high");
+    // Unmeasured roles keep what every model ran at before the 5.5 family.
+    expect(effortOf(runner, "summarizer")).toBe("high");
+    expect(effortOf(runner, "scout")).toBe("high");
+  });
+
+  test("an explicit frontmatter `effort:` outranks the role default", async () => {
+    const runner = new FakeStepRunner(refuterScript);
+    const input = await makeInput(
+      {},
+      {
+        agentsDir: await makeAgentsDir({
+          hunterEffort: "high",
+          refuterEffort: "max",
+        }),
+      },
+    );
+
+    await runPipeline(input, { runner });
+
+    expect(effortOf(runner, "hunter-reliability")).toBe("high");
+    expect(effortOf(runner, "refuter-F001")).toBe("max");
+  });
+
+  test("the rereview verifier falls back to high when its prompt omits effort", async () => {
+    const runner = new FakeStepRunner({
+      verifier: (spec) =>
+        ok(spec, {
+          results: [
+            {
+              finding_id: "V001",
+              outcome: "refuted",
+              proof_refs: ["src/app.ts:10"],
+            },
+          ],
+        }),
+    });
+    const input = await makeInput({
+      skipDiscovery: true,
+      verifyQueue: [
+        {
+          priorId: "R001",
+          sev: "CRITICAL",
+          trigger: "touched",
+          claim: "a live defect",
+          locs: ["src/app.ts:10"],
+          authorReply: "",
+          commentBody: "",
+          triageTag: "",
+          deltaHunks: "",
+        },
+      ],
+    });
+
+    await runPipeline(input, { runner });
+
+    expect(effortOf(runner, "verify-V001")).toBe("high");
+  });
+
+  test("pipeline.json records the effort each step was asked to run at", async () => {
+    const runner = new FakeStepRunner(refuterScript);
+    const input = await makeInput();
+
+    await runPipeline(input, { runner });
+
+    const plan = (await readPlan(input.runDir)) as {
+      steps: Array<{ name: string; effort?: string; effort_applied?: boolean }>;
+    };
+    const byName = new Map(plan.steps.map((s) => [s.name, s]));
+    expect(byName.get("hunter-reliability")?.effort).toBe("xhigh");
+    expect(byName.get("refuter-F001")?.effort).toBe("high");
+    // The default plan routes these steps at the Claude CLI, which has the flag.
+    expect(byName.get("hunter-reliability")?.effort_applied).toBe(true);
+  });
+});
 
 describe("engine-owned scout", () => {
   test("§3.12.2 — off by default: no step is spawned and no scout row is written", async () => {

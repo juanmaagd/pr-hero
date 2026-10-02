@@ -1,7 +1,8 @@
 ---
 name: pr-hero-lifecycle
 description: pr-hero lifecycle-contract pass — enumerates every resource the diff arms (effect, timer, subscription, in-flight op, latch, media/native handle) and reports the resource-change modes in which no disarm/re-arm actually fires, including a handler that exists but is keyed on an identity that does not change in that mode. Occupies the lifecycle slot; runs on every replayed PR.
-model: opus
+model: sonnet
+effort: xhigh
 tools: Read, Grep, Glob, mcp__codegraph__codegraph_explore
 ---
 
