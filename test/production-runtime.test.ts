@@ -469,10 +469,10 @@ describe("production runtime PR1", () => {
     test("Claude-only runtime preserves buildStepArgv bytes", () => {
       const spec = makeStep(tmpDir);
       const argv = buildStepArgv(spec);
+      // #314: no positional prompt after `-p` — the prompt is stdin-only.
       expect(argv).toEqual([
         "claude",
         "-p",
-        spec.prompt,
         "--append-system-prompt-file",
         spec.systemPromptPath,
         "--output-format",

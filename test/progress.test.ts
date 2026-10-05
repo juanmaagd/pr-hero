@@ -271,6 +271,92 @@ describe("panel state transitions", () => {
     expect(rendered[2]).toBe("└─ ✗ resilience   failed — the run continues");
   });
 
+  // #314: "failed" alone hid an E2BIG that killed every hunter. The reason
+  // rides as a leaf under the row, so the row's own wording is unchanged.
+  test("a failed hunter shows the pipeline's reason as a leaf", () => {
+    const state = freshState();
+    started(state);
+    applyProgressEvent(
+      state,
+      {
+        kind: "hunter-finished",
+        hunter: "resilience",
+        ok: false,
+        durationMs: 7_000,
+        reason: "spawn failed: E2BIG: argument list too long",
+      },
+      7_000,
+    );
+    const rendered = lines(state, 7_000);
+    expect(rendered[2]).toBe("└─ ✗ resilience   failed — the run continues");
+    expect(rendered[3]).toBe(
+      "   └─ spawn failed: E2BIG: argument list too long",
+    );
+    expect(renderPanelLines(state, 7_000, 0, false).join("\n")).not.toContain(
+      "\x1b[",
+    );
+  });
+
+  // The panel is not width-aware and its redraw counts returned lines, so a
+  // leaf that wraps would orphan a row on every redraw: the leaf is capped.
+  test("a long failure reason is capped to keep the leaf on one row", () => {
+    const state = freshState();
+    started(state);
+    applyProgressEvent(
+      state,
+      {
+        kind: "hunter-finished",
+        hunter: "resilience",
+        ok: false,
+        durationMs: 1_000,
+        reason: "r".repeat(160),
+      },
+      1_000,
+    );
+    const leaf = lines(state, 1_000)[3] ?? "";
+    expect(leaf).toBe(`   └─ ${"r".repeat(63)}…`);
+  });
+
+  test("a failed hunter without a reason renders no leaf", () => {
+    const state = freshState();
+    started(state);
+    applyProgressEvent(
+      state,
+      {
+        kind: "hunter-finished",
+        hunter: "resilience",
+        ok: false,
+        durationMs: 1_000,
+      },
+      1_000,
+    );
+    expect(lines(state, 1_000)).toHaveLength(3);
+  });
+
+  test("a failed summarizer shows its reason as a leaf", () => {
+    const state = createPanelState("PR #1682", 0, ["reliability"], {
+      refuter: false,
+      summarizer: true,
+    });
+    applyProgressEvent(
+      state,
+      {
+        kind: "summarizer-finished",
+        ok: false,
+        durationMs: 3_000,
+        reason: "API Error: Connection closed mid-response",
+      },
+      3_000,
+    );
+    expect(lines(state, 3_000).slice(-2)).toEqual([
+      "└─ ✗ summarizer   failed — the run continues",
+      "   └─ API Error: Connection closed mid-response",
+    ]);
+    expect(renderPanelLines(state, 3_000, 0, false).join("\n")).not.toContain(
+      "\x1b[",
+    );
+  });
+
   test("one draft is one draft, not one drafts", () => {
     const state = freshState();
     started(state);

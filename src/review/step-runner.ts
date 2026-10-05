@@ -124,14 +124,16 @@ export const DEFAULT_STEP_MAX_ATTEMPTS = 2;
 
 export type RetryFailureClass = Exclude<FailureClass, "terminal">;
 
-export function buildStepArgv(
-  step: StepSpec,
-  prompt: string = step.prompt,
-): string[] {
+// The Claude CLI argv a step spawns with, mirroring the flag order of
+// ClaudeCodeCliTransport.execute so the isolation flags can be asserted
+// without a transport. It takes no prompt (#314): the prompt goes to
+// the child on stdin, because one argv string over Linux's MAX_ARG_STRLEN
+// (131072 bytes) fails execve with E2BIG and the prompt embeds the whole
+// patch. `-p` with no positional is what makes the CLI read stdin.
+export function buildStepArgv(step: StepSpec): string[] {
   return [
     "claude",
     "-p",
-    prompt,
     "--append-system-prompt-file",
     step.systemPromptPath,
     "--output-format",

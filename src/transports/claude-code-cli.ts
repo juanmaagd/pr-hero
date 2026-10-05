@@ -720,10 +720,11 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         `claude-code transport requires an explicit effort, got ${JSON.stringify(request.effort)}`,
       );
     }
+    // `-p` with NO positional prompt: the CLI then reads the prompt from
+    // stdin, which the spawn below supplies (#314 — see the WHY there).
     const args = [
       request.isolation.verifiedBinaryPath,
       "-p",
-      request.userPrompt,
       "--append-system-prompt-file",
       request.systemPromptPath,
       "--output-format",
@@ -768,13 +769,46 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     // detached: Bun maps this to setsid() on POSIX, so the child starts a new
     // session and leads its own process group — the precondition for §5.2's
     // negative-PGID cascade to be safe at all.
-    const proc = this.spawnFn(args, {
-      cwd: request.cwd,
-      env: request.isolation.env,
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
-    }) as unknown as CliProc;
+    //
+    // stdin carries the user prompt, never argv (#314). The prompt embeds the
+    // whole patch, and Linux caps ONE argv string at MAX_ARG_STRLEN (131072
+    // bytes including the NUL): a 175,805-byte patch made execve fail with
+    // E2BIG, so every hunter on that PR died in 7s before reaching the
+    // provider. stdin has no such bound. `claude -p` with no positional
+    // prompt reads it from stdin (verified against claude 2.1.289 with a
+    // 175,865-byte prompt). Never pass both: which one the CLI would honor is
+    // unverified, and a positional prompt brings the size bug back. Same
+    // channel and reason as gh's report body in pr/pr.ts.
+    //
+    // A synchronous spawn throw (execve refused: E2BIG, ENOENT, EACCES) is a
+    // failed attempt with its reason, not a rejection (#314). Thrown, it
+    // escaped before the try below, the harness swallowed the rejection and
+    // settled the attempt as cancelled (the step's only recorded reason was
+    // "step cancelled; settled per §5.3"), and the run log said only "failed" —
+    // the E2BIG that killed every hunter was visible nowhere. Nothing was
+    // spawned, so nothing is registered and nothing was spent.
+    let proc: CliProc;
+    try {
+      proc = this.spawnFn(args, {
+        cwd: request.cwd,
+        env: request.isolation.env,
+        stdin: new TextEncoder().encode(request.userPrompt),
+        stdout: "pipe",
+        stderr: "pipe",
+        detached: true,
+      }) as unknown as CliProc;
+    } catch (error) {
+      return {
+        completion: "failed",
+        protocolIntegrity: "unverified",
+        finalText: "",
+        usage: noSpawnUsage(
+          Math.round(performance.now() - start),
+          request.isolation.env,
+        ),
+        stderrTail: spawnFailureTail(error),
+      };
+    }
 
     ACTIVE_CHILD_PROCS.add(proc);
 
@@ -962,6 +996,15 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
   classifyFailure(
     outcome: TransportOutcome,
   ): TransportFailureCause | undefined {
+    // First, and definitive whatever the error text says (PR #315 review
+    // F004): no child started, so nothing reached a provider and the same
+    // argv would be refused again. Unclassified, it fell through to the
+    // legacy "format" class and respawned once with a format reminder — a
+    // longer prompt, against the E2BIG that a too-long argv caused. See
+    // isSpawnFailureTail for why the whole tail is the witness.
+    if (isSpawnFailureTail(outcome.stderrTail)) {
+      return "runtime_unavailable";
+    }
     const witness = `${outcome.stderrTail}\n${outcome.finalText}`;
     // The child's stderr, with no model output mixed in — see the two-witness
     // note on the backpressure branch below.
@@ -1019,4 +1062,43 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     }
     return undefined;
   }
+}
+
+// The failed outcome execute() returns when spawn throws, and its exact
+// witness for classifyFailure. Producer and matcher share these two
+// constants so a reworded message cannot silently become retryable again.
+// The WHOLE tail is matched, not a line inside it: this outcome never has a
+// child, so its stderrTail is exactly this string and nothing else, while a
+// real child's stderr that merely quotes the phrase starts with the child's
+// own output. classifyFailure runs on the transport's outcome before the
+// harness appends its own annotations, so the suffix is still the end. The
+// message between them can span lines; prefix and suffix cannot.
+const SPAWN_FAILURE_PREFIX = "[pr-hero] spawn failed: ";
+const SPAWN_FAILURE_SUFFIX = "; no child started";
+
+function spawnFailureTail(error: unknown): string {
+  return `${SPAWN_FAILURE_PREFIX}${describeSpawnError(error)}${SPAWN_FAILURE_SUFFIX}`;
+}
+
+function isSpawnFailureTail(stderrTail: string): boolean {
+  return (
+    stderrTail.startsWith(SPAWN_FAILURE_PREFIX) &&
+    stderrTail.endsWith(SPAWN_FAILURE_SUFFIX)
+  );
+}
+
+// "<code>: <message>" for a spawn throw, without repeating a code the message
+// already leads with (Bun's system errors often do). A non-Error throw is
+// stringified rather than dropped: the reason is the whole point (#314).
+function describeSpawnError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = (error as { code?: unknown }).code;
+  if (
+    typeof code === "string" &&
+    code !== "" &&
+    !error.message.includes(code)
+  ) {
+    return `${code}: ${error.message}`;
+  }
+  return error.message;
 }

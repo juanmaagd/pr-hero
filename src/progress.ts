@@ -49,6 +49,8 @@ interface PanelHunter {
   // Latest only: a step retries at most twice (one transient, one format), and
   // what an operator needs is "it is retrying now", not a history.
   retry?: { attempt: number; maxAttempts: number; reason: string };
+  // Why the step failed, as the pipeline's event carried it (#314).
+  failureReason?: string;
 }
 
 // The scout is the one stage with a real STARTED event, because it is the one
@@ -68,6 +70,7 @@ interface PanelSummarizer {
   // event. Seeding it as running keeps the first frame truthful.
   status: PanelSummarizerStatus;
   durationMs?: number;
+  failureReason?: string;
 }
 
 // One refuter leaf: a finding submitted to the gate. Every leaf is running
@@ -158,6 +161,9 @@ export function applyProgressEvent(
       row.status = event.ok ? "done" : "failed";
       row.durationMs = event.durationMs;
       if (event.drafts !== undefined) row.drafts = event.drafts;
+      if (!event.ok && event.reason !== undefined) {
+        row.failureReason = event.reason;
+      }
       return;
     }
     case "dedupe-finished":
@@ -219,6 +225,9 @@ export function applyProgressEvent(
       if (!state.summarizer) return;
       state.summarizer.status = event.ok ? "done" : "failed";
       state.summarizer.durationMs = event.durationMs;
+      if (!event.ok && event.reason !== undefined) {
+        state.summarizer.failureReason = event.reason;
+      }
       return;
     }
     case "step-retry": {
@@ -240,6 +249,26 @@ export function applyProgressEvent(
       return;
     }
   }
+}
+
+// The failure-reason leaf under a failed row (#314). Capped well below the
+// pipeline's own 160: this panel is not width-aware, and its redraw walks the
+// cursor up by the number of LINES it returned — a leaf that wraps in the
+// terminal occupies two rows the arithmetic never counted, and every redraw
+// after that leaves an orphaned copy behind. The full reason is in the
+// non-TTY log line and the step's artifacts.
+const PANEL_REASON_MAX_CHARS = 64;
+
+function failureReasonChildren(reason: string | undefined): TreeNode[] {
+  if (reason === undefined) return [];
+  return [
+    {
+      label:
+        reason.length <= PANEL_REASON_MAX_CHARS
+          ? reason
+          : `${reason.slice(0, PANEL_REASON_MAX_CHARS - 1)}…`,
+    },
+  ];
 }
 
 function pad(text: string, width: number): string {
@@ -276,7 +305,12 @@ function hunterNode(
   const label = pad(hunter.key, labelWidth);
   // The retry leaf outlives the retry: a finished row that says "attempt 2"
   // explains a duration that would otherwise look like a slow model.
-  const children = retryChildren(hunter);
+  const children = [
+    ...retryChildren(hunter),
+    ...(hunter.status === "failed"
+      ? failureReasonChildren(hunter.failureReason)
+      : []),
+  ];
   const model = modelWidth === 0 ? "" : pad(hunter.model ?? "", modelWidth);
   const parts: string[] = [];
   if (model.length > 0) parts.push(model);
@@ -372,6 +406,10 @@ function summarizerNode(
       : summarizer.status === "done"
         ? formatElapsed(summarizer.durationMs ?? 0)
         : "failed — the run continues";
+  const children =
+    summarizer.status === "failed"
+      ? failureReasonChildren(summarizer.failureReason)
+      : [];
   return {
     label: pad("summarizer", labelWidth),
     status:
@@ -381,6 +419,7 @@ function summarizerNode(
           ? "done"
           : "failed",
     detail,
+    ...(children.length === 0 ? {} : { children }),
   };
 }
 
