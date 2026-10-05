@@ -783,7 +783,8 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     // A synchronous spawn throw (execve refused: E2BIG, ENOENT, EACCES) is a
     // failed attempt with its reason, not a rejection (#314). Thrown, it
     // escaped before the try below, the harness swallowed the rejection and
-    // settled the step as cancelled, and the run log said only "failed" —
+    // settled the attempt as cancelled (the step's only recorded reason was
+    // "step cancelled; settled per §5.3"), and the run log said only "failed" —
     // the E2BIG that killed every hunter was visible nowhere. Nothing was
     // spawned, so nothing is registered and nothing was spent.
     let proc: CliProc;
