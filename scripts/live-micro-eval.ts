@@ -1,7 +1,7 @@
 // Slice-3 live micro-eval (plan §Evals): one REAL ClaudeCodeRunner.run() with
 // a trivial StepSpec. Proves the actual spawn path, JSON envelope parsing and
 // usage capture outside the fake — costs cents. Run: bun run scripts/live-micro-eval.ts
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { defaultEffortForRole } from "#model/catalog";
@@ -60,6 +60,10 @@ if (scoutMode) {
       'else: {"findings":[]}',
   );
 }
+// The transport's prompt-integrity check refuses a system prompt that is not
+// mode 600 and never spawns (the pipeline chmods its own the same way). Without
+// this the probe reported `failed` from a denial, not from the real CLI.
+chmodSync(systemPromptPath, 0o600);
 const mcpConfigPath = path.join(dir, "mcp.json");
 writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
 
