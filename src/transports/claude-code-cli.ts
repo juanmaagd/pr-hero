@@ -720,10 +720,11 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
         `claude-code transport requires an explicit effort, got ${JSON.stringify(request.effort)}`,
       );
     }
+    // `-p` with NO positional prompt: the CLI then reads the prompt from
+    // stdin, which the spawn below supplies (#314 — see the WHY there).
     const args = [
       request.isolation.verifiedBinaryPath,
       "-p",
-      request.userPrompt,
       "--append-system-prompt-file",
       request.systemPromptPath,
       "--output-format",
@@ -768,9 +769,20 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     // detached: Bun maps this to setsid() on POSIX, so the child starts a new
     // session and leads its own process group — the precondition for §5.2's
     // negative-PGID cascade to be safe at all.
+    //
+    // stdin carries the user prompt, never argv (#314). The prompt embeds the
+    // whole patch, and Linux caps ONE argv string at MAX_ARG_STRLEN (131072
+    // bytes including the NUL): a 175,805-byte patch made execve fail with
+    // E2BIG, so every hunter on that PR died in 7s before reaching the
+    // provider. stdin has no such bound. `claude -p` with no positional
+    // prompt reads it from stdin (verified against claude 2.1.289 with a
+    // 175,865-byte prompt). Never pass both: which one the CLI would honor is
+    // unverified, and a positional prompt brings the size bug back. Same
+    // channel and reason as gh's report body in pr/pr.ts.
     const proc = this.spawnFn(args, {
       cwd: request.cwd,
       env: request.isolation.env,
+      stdin: new TextEncoder().encode(request.userPrompt),
       stdout: "pipe",
       stderr: "pipe",
       detached: true,

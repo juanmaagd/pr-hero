@@ -16,7 +16,9 @@ import {
 import { FORMAT_RETRY_REMINDER } from "../../src/execution/step-artifacts";
 
 // ---------------------------------------------------------------------------
-// FakeSpawn: scripted {stdout, stderr, exitCode} per call, records argv/cwd.
+// FakeSpawn: scripted {stdout, stderr, exitCode} per call, records argv/cwd
+// and the prompt the transport wrote to stdin (#314: the prompt travels on
+// stdin, never argv).
 // A `hang: true` script entry produces a process whose streams and exit only
 // settle when kill() fires — how the watchdog path gets exercised without a
 // real 30-minute wait.
@@ -32,6 +34,8 @@ interface ScriptedCall {
 interface RecordedCall {
   argv: string[];
   cwd: string | undefined;
+  // Decoded stdin bytes, or undefined when the spawn passed no stdin buffer.
+  stdin: string | undefined;
 }
 
 function makeFakeSpawn(script: ScriptedCall[]): {
@@ -40,11 +44,22 @@ function makeFakeSpawn(script: ScriptedCall[]): {
 } {
   const calls: RecordedCall[] = [];
   const encoder = new TextEncoder();
-  const spawnFn = ((argv: string[], opts?: { cwd?: string }) => {
+  const decoder = new TextDecoder();
+  const spawnFn = ((
+    argv: string[],
+    opts?: { cwd?: string; stdin?: unknown },
+  ) => {
     // Repeat the last scripted entry when exhausted, so a runner that makes
     // more calls than expected fails an assertion instead of crashing.
     const scripted = script[Math.min(calls.length, script.length - 1)] ?? {};
-    calls.push({ argv, cwd: opts?.cwd });
+    calls.push({
+      argv,
+      cwd: opts?.cwd,
+      stdin:
+        opts?.stdin instanceof Uint8Array
+          ? decoder.decode(opts.stdin)
+          : undefined,
+    });
     let resolveExit: (code: number) => void = () => {};
     const exited = new Promise<number>((resolve) => {
       resolveExit = resolve;
@@ -137,7 +152,14 @@ describe("buildStepArgv", () => {
   test("carries every isolation flag verbatim", async () => {
     const spec = await makeSpec();
     const argv = buildStepArgv(spec);
-    expect(argv.slice(0, 3)).toEqual(["claude", "-p", spec.prompt]);
+    // #314: `-p` with no positional prompt — the prompt goes on stdin, so
+    // the next element is already a flag and the prompt is nowhere in argv.
+    expect(argv.slice(0, 3)).toEqual([
+      "claude",
+      "-p",
+      "--append-system-prompt-file",
+    ]);
+    expect(argv).not.toContain(spec.prompt);
     expect(flagValue(argv, "--append-system-prompt-file")).toBe(
       spec.systemPromptPath,
     );
@@ -391,7 +413,12 @@ describe("ClaudeCodeRunner format-retry", () => {
     const stepResult = await runner.run(spec);
     expect(stepResult.status).toBe("ok");
     expect(stepResult.attempts).toBe(2);
-    expect(calls[1]?.argv[2]).toBe(spec.prompt + FORMAT_RETRY_REMINDER);
+    // The re-prompt travels the same channel as the first prompt (#314):
+    // stdin, with nothing of it left in argv.
+    expect(calls[0]?.stdin).toBe(spec.prompt);
+    expect(calls[1]?.stdin).toBe(spec.prompt + FORMAT_RETRY_REMINDER);
+    expect(calls[1]?.argv).not.toContain(spec.prompt + FORMAT_RETRY_REMINDER);
+    expect(calls[1]?.argv[2]).toBe("--append-system-prompt-file");
   });
 
   test("is capped at one: a second parse failure fails the step", async () => {
@@ -418,7 +445,7 @@ describe("ClaudeCodeRunner terminal failure", () => {
     expect(stepResult.attempts).toBe(1);
     expect(calls).toHaveLength(1);
     expect(seen).toEqual([]);
-    expect(calls[0]?.argv[2]).toBe(spec.prompt);
+    expect(calls[0]?.stdin).toBe(spec.prompt);
   });
 });
 

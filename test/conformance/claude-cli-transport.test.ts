@@ -1384,3 +1384,113 @@ describe("ClaudeCodeCliTransport toolInvocations from num_turns (#299)", () => {
     expect(await toolInvocationsFor("not json at all")).toBeUndefined();
   });
 });
+
+// #314: the whole user prompt embeds the full patch, and Linux caps ONE argv
+// string at MAX_ARG_STRLEN (131072 bytes incl. the NUL), so a positional prompt
+// made every hunter die with E2BIG on a 175 KB patch. The prompt now travels on
+// stdin; these pin that it never comes back to argv, and that the isolation
+// flags around it are byte-identical on the REAL transport argv (only
+// buildStepArgv's mirror was asserted before).
+describe("ClaudeCodeCliTransport prompt delivery and isolation argv (#314)", () => {
+  // Linux MAX_ARG_STRLEN minus the terminating NUL: the longest single argv
+  // string execve accepts (131072 was verified to fail with E2BIG).
+  const MAX_ARG_BYTES = 131_071;
+
+  async function captureSpawn(request: TransportRequest): Promise<{
+    args: string[];
+    opts: Record<string, unknown>;
+  }> {
+    const fake = makeFakeProc({
+      stdoutBody: JSON.stringify({ result: "ok" }),
+      exitCode: 0,
+    });
+    let captured: { args: string[]; opts: Record<string, unknown> } | undefined;
+    const spawnFn = ((args: string[], opts: Record<string, unknown>) => {
+      captured = { args, opts };
+      return fake.proc;
+    }) as unknown as typeof Bun.spawn;
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn,
+      getPgid: (pid) => pid,
+    });
+    await transport.execute(request, {
+      signal: new AbortController().signal,
+    });
+    if (captured === undefined) throw new Error("spawnFn was never called");
+    return captured;
+  }
+
+  function decodedStdin(opts: Record<string, unknown>): string | undefined {
+    const stdin = opts.stdin;
+    return stdin instanceof Uint8Array
+      ? new TextDecoder().decode(stdin)
+      : undefined;
+  }
+
+  test("argv carries no prompt and stdin carries exactly the prompt", async () => {
+    const prompt = "review this diff, please";
+    const { args, opts } = await captureSpawn(
+      makeRequest({ userPrompt: prompt }),
+    );
+    // Adjacency, not just absence: `-p` is followed straight by a flag, so no
+    // positional prompt can be hiding between them.
+    expect(args[1]).toBe("-p");
+    expect(args[2]).toBe("--append-system-prompt-file");
+    expect(args).not.toContain(prompt);
+    expect(decodedStdin(opts)).toBe(prompt);
+  });
+
+  test("a prompt past MAX_ARG_STRLEN never reaches an argv element", async () => {
+    // ~200 KB with multi-byte characters, so bytes and UTF-16 length differ
+    // and the bound is checked in the unit the kernel counts.
+    const prompt = `diff --git a/x b/x\n${"é patch line\n".repeat(15_000)}`;
+    expect(Buffer.byteLength(prompt)).toBeGreaterThan(MAX_ARG_BYTES + 1);
+    const { args, opts } = await captureSpawn(
+      makeRequest({ userPrompt: prompt }),
+    );
+    for (const arg of args) {
+      expect(Buffer.byteLength(arg)).toBeLessThanOrEqual(MAX_ARG_BYTES);
+    }
+    const stdin = decodedStdin(opts);
+    // Length first and a boolean compare after: a toBe on 200 KB strings
+    // renders an unreadable failure diff.
+    expect(stdin?.length).toBe(prompt.length);
+    expect(stdin === prompt).toBe(true);
+  });
+
+  test("isolation flags are emitted verbatim with an MCP config", async () => {
+    const { args } = await captureSpawn(
+      makeRequest({
+        mcpConfigPath: "/tmp/pr-hero-test/mcp.json",
+        tools: ["Read", "Grep"],
+      }),
+    );
+    const flagValue = (flag: string): string | undefined => {
+      const at = args.indexOf(flag);
+      return at === -1 ? undefined : args[at + 1];
+    };
+    expect(flagValue("--mcp-config")).toBe("/tmp/pr-hero-test/mcp.json");
+    expect(args[args.indexOf("--mcp-config") + 2]).toBe("--strict-mcp-config");
+    // The empty value must sit right after its flag, or the next flag would be
+    // read as the setting sources.
+    expect(flagValue("--setting-sources")).toBe("");
+    expect(flagValue("--tools")).toBe("Read,Grep");
+    expect(flagValue("--permission-mode")).toBe("bypassPermissions");
+    expect(flagValue("--output-format")).toBe("json");
+    expect(flagValue("--append-system-prompt-file")).toBe(
+      "/tmp/pr-hero-test/system.md",
+    );
+  });
+
+  test("without an MCP config no MCP flag is emitted, and the rest still are", async () => {
+    const { args } = await captureSpawn(makeRequest());
+    expect(args).not.toContain("--mcp-config");
+    expect(args).not.toContain("--strict-mcp-config");
+    expect(args[args.indexOf("--setting-sources") + 1]).toBe("");
+    expect(args[args.indexOf("--permission-mode") + 1]).toBe(
+      "bypassPermissions",
+    );
+    expect(args[args.indexOf("--tools") + 1]).toBe("Read");
+  });
+});
