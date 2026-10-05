@@ -453,8 +453,13 @@ describe("ClaudeCodeRunner terminal failure", () => {
 // used to reject out of the transport; the harness swallowed it and the step
 // settled `cancelled` with an empty stderrTail, so the run log could only
 // say "failed". It must reach the step result as a failure WITH its reason.
+//
+// PR #315 review F004: and it must fail ONCE. Unclassified, the reason fell
+// through to the legacy "format" class, so the step respawned with a
+// format reminder — the same argv execve had just refused — and the run log
+// showed a "format retry" for a hunter whose model never produced a byte.
 describe("ClaudeCodeRunner spawn failure", () => {
-  test("a throwing spawn fails the step and carries the reason", async () => {
+  test("a throwing spawn fails the step once, with its reason, and no retry", async () => {
     let spawns = 0;
     const spawnFn = (() => {
       spawns += 1;
@@ -462,16 +467,15 @@ describe("ClaudeCodeRunner spawn failure", () => {
         code: "E2BIG",
       });
     }) as unknown as typeof Bun.spawn;
-    const spec = await makeSpec();
+    const seen: RetryInfo[] = [];
+    const spec = await makeSpec({ onRetry: (info) => seen.push(info) });
     const stepResult = await new ClaudeCodeRunner({ spawnFn }).run(spec);
     expect(stepResult.status).toBe("failed");
     expect(stepResult.stderrTail).toContain("spawn failed");
     expect(stepResult.stderrTail).toContain("E2BIG");
-    // Pinned as observed, not as policy: the reason matches no transient or
-    // auth witness, so it falls through to the legacy "format" class and gets
-    // its single format-reminder retry, like a prompt-integrity denial.
-    expect(stepResult.attempts).toBe(2);
-    expect(spawns).toBe(2);
+    expect(stepResult.attempts).toBe(1);
+    expect(spawns).toBe(1);
+    expect(seen).toEqual([]);
   });
 });
 

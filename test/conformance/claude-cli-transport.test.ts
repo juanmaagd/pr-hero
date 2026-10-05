@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { TransportRequest } from "../../src/execution/contracts";
+import {
+  decideRetryDisposition,
+  resolveFailureCause,
+} from "../../src/execution/failure-policy";
 import { ACTIVE_CHILD_PROCS } from "../../src/execution/spawned-process";
 import { settlementFromUsage } from "../../src/execution/spend-limiter";
 import {
@@ -1556,5 +1560,61 @@ describe("ClaudeCodeCliTransport spawn failure (#314)", () => {
     expect(outcome.stderrTail).toBe(
       "[pr-hero] spawn failed: boom; no child started",
     );
+  });
+
+  // PR #315 review F004: a spawn that started no child is terminal. Driven
+  // through execute() so the classifier is checked against what the transport
+  // REALLY produces — a reworded tail that stops matching fails here.
+  // runtime_unavailable is the frozen cause OpenCode already uses for a turn
+  // that never started, and §7 rules it terminal: retrying cannot help an
+  // argv execve refused, and a format reminder only makes the prompt longer.
+  test("classifies as runtime_unavailable, terminal, never a format retry", async () => {
+    const error = Object.assign(new Error("argument list too long"), {
+      code: "E2BIG",
+    });
+    const { outcome } = await executeWith(error);
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    expect(transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+    expect(
+      resolveFailureCause({
+        outcome,
+        classifyFailure: transport.classifyFailure,
+        parseThrew: false,
+      }),
+    ).toEqual({ kind: "cause", cause: "runtime_unavailable" });
+    expect(
+      decideRetryDisposition("runtime_unavailable", {
+        transientAttemptsUsed: 0,
+        formatRetriesUsed: 0,
+      }),
+    ).toEqual({ action: "terminal" });
+  });
+
+  test("a multi-line spawn error is still recognized", async () => {
+    const { outcome } = await executeWith(new Error("first line\nsecond line"));
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    expect(transport.classifyFailure(outcome)).toBe("runtime_unavailable");
+  });
+
+  // Only the transport's own whole tail is the witness. A child's stderr that
+  // merely quotes the phrase is a real child's output, not a spawn failure.
+  test("child stderr quoting the phrase is not a spawn failure", () => {
+    const transport = new ClaudeCodeCliTransport(okPromptFns);
+    const outcome = {
+      completion: "failed" as const,
+      protocolIntegrity: "unverified" as const,
+      finalText: "",
+      usage: {
+        wallMs: 0,
+        tokens: {},
+        completeness: "complete" as const,
+        billingMode: "subscription" as const,
+        costSource: "subscription" as const,
+        cashCostUsd: 0,
+      },
+      stderrTail:
+        "child log: [pr-hero] spawn failed: E2BIG: argument list too long; no child started",
+    };
+    expect(transport.classifyFailure(outcome)).toBeUndefined();
   });
 });

@@ -806,7 +806,7 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
           Math.round(performance.now() - start),
           request.isolation.env,
         ),
-        stderrTail: `[pr-hero] spawn failed: ${describeSpawnError(error)}; no child started`,
+        stderrTail: spawnFailureTail(error),
       };
     }
 
@@ -996,6 +996,15 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
   classifyFailure(
     outcome: TransportOutcome,
   ): TransportFailureCause | undefined {
+    // First, and definitive whatever the error text says (PR #315 review
+    // F004): no child started, so nothing reached a provider and the same
+    // argv would be refused again. Unclassified, it fell through to the
+    // legacy "format" class and respawned once with a format reminder — a
+    // longer prompt, against the E2BIG that a too-long argv caused. See
+    // isSpawnFailureTail for why the whole tail is the witness.
+    if (isSpawnFailureTail(outcome.stderrTail)) {
+      return "runtime_unavailable";
+    }
     const witness = `${outcome.stderrTail}\n${outcome.finalText}`;
     // The child's stderr, with no model output mixed in — see the two-witness
     // note on the backpressure branch below.
@@ -1053,6 +1062,29 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     }
     return undefined;
   }
+}
+
+// The failed outcome execute() returns when spawn throws, and its exact
+// witness for classifyFailure. Producer and matcher share these two
+// constants so a reworded message cannot silently become retryable again.
+// The WHOLE tail is matched, not a line inside it: this outcome never has a
+// child, so its stderrTail is exactly this string and nothing else, while a
+// real child's stderr that merely quotes the phrase starts with the child's
+// own output. classifyFailure runs on the transport's outcome before the
+// harness appends its own annotations, so the suffix is still the end. The
+// message between them can span lines; prefix and suffix cannot.
+const SPAWN_FAILURE_PREFIX = "[pr-hero] spawn failed: ";
+const SPAWN_FAILURE_SUFFIX = "; no child started";
+
+function spawnFailureTail(error: unknown): string {
+  return `${SPAWN_FAILURE_PREFIX}${describeSpawnError(error)}${SPAWN_FAILURE_SUFFIX}`;
+}
+
+function isSpawnFailureTail(stderrTail: string): boolean {
+  return (
+    stderrTail.startsWith(SPAWN_FAILURE_PREFIX) &&
+    stderrTail.endsWith(SPAWN_FAILURE_SUFFIX)
+  );
 }
 
 // "<code>: <message>" for a spawn throw, without repeating a code the message
