@@ -21,6 +21,7 @@ import {
   parityTriggered,
   RUNTIME_PREAMBLE,
   runPipeline,
+  stepFailureReason,
 } from "#review/pipeline";
 import { GOTCHAS_TEMPLATE } from "#review/preflight";
 import type { ScoutLead } from "#review/scout";
@@ -746,6 +747,8 @@ describe("engine-owned summarizer", () => {
       kind: "summarizer-finished",
       ok: false,
       durationMs: expect.any(Number),
+      // #314: a rejection's reason is its error message.
+      reason: "summarizer process rejected",
     });
   });
 
@@ -2945,6 +2948,134 @@ describe("progress events", () => {
     expect(result.skillOutput.run_status).toBe("complete");
     expect(result.sessionFailed).toBe(false);
     expect(result.skillOutput.findings).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #314 — a failed step's reason reaches the progress events
+// ---------------------------------------------------------------------------
+
+describe("stepFailureReason", () => {
+  test("takes the last non-empty line and drops the engine tag", () => {
+    expect(
+      stepFailureReason(
+        "child noise\n[pr-hero] spawn failed: E2BIG: argument list too long; no child started\n\n",
+      ),
+    ).toBe("spawn failed: E2BIG: argument list too long; no child started");
+  });
+
+  test("collapses whitespace runs to one space", () => {
+    expect(stepFailureReason("API Error:\t 529   overloaded_error")).toBe(
+      "API Error: 529 overloaded_error",
+    );
+  });
+
+  test("an empty or blank witness has no reason", () => {
+    expect(stepFailureReason("")).toBeUndefined();
+    expect(stepFailureReason(" \n\t\n")).toBeUndefined();
+    expect(stepFailureReason("[pr-hero]   ")).toBeUndefined();
+  });
+
+  test("a long line is capped at 160 characters with an ellipsis", () => {
+    const reason = stepFailureReason("x".repeat(500));
+    expect(reason).toHaveLength(160);
+    expect(reason?.endsWith("…")).toBe(true);
+    expect(stepFailureReason("y".repeat(160))).toBe("y".repeat(160));
+  });
+});
+
+describe("failure reasons on progress events (#314)", () => {
+  const SPAWN_FAILED =
+    "[pr-hero] spawn failed: E2BIG: argument list too long; no child started";
+
+  function finishedHunters(
+    events: PipelineProgressEvent[],
+  ): Extract<PipelineProgressEvent, { kind: "hunter-finished" }>[] {
+    return events.filter((e) => e.kind === "hunter-finished") as Extract<
+      PipelineProgressEvent,
+      { kind: "hunter-finished" }
+    >[];
+  }
+
+  test("a failed hunter step carries its stderrTail's last line; a done one carries none", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) => ok(spec, { findings: [draft()] }),
+      "hunter-resilience": (spec) => ({
+        ...failed(spec),
+        stderrTail: `earlier noise\n${SPAWN_FAILED}`,
+      }),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    const byHunter = new Map(finishedHunters(events).map((e) => [e.hunter, e]));
+    expect(byHunter.get("resilience")?.ok).toBe(false);
+    expect(byHunter.get("resilience")?.reason).toBe(
+      "spawn failed: E2BIG: argument list too long; no child started",
+    );
+    expect(byHunter.get("reliability")?.ok).toBe(true);
+    expect(byHunter.get("reliability")).not.toHaveProperty("reason");
+  });
+
+  test("a failed step with an empty stderrTail emits no reason key at all", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) => ok(spec, emptyDraft()),
+      "hunter-resilience": (spec) => ({ ...failed(spec), stderrTail: "" }),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    const resilience = finishedHunters(events).find(
+      (e) => e.hunter === "resilience",
+    );
+    expect(resilience?.ok).toBe(false);
+    expect(resilience).not.toHaveProperty("reason");
+  });
+
+  test("a rejected hunter step carries the error message", async () => {
+    const runner: StepRunner = {
+      async run(spec) {
+        if (spec.name === "hunter-resilience") {
+          throw new Error("runner exploded\nwith a second line");
+        }
+        return ok(spec, emptyDraft());
+      },
+    };
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    const resilience = finishedHunters(events).find(
+      (e) => e.hunter === "resilience",
+    );
+    expect(resilience?.ok).toBe(false);
+    expect(resilience?.reason).toBe("with a second line");
+  });
+
+  test("a failed summarizer step carries its reason", async () => {
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      summarizer: (spec) => ({ ...failed(spec), stderrTail: SPAWN_FAILED }),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(input, {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    expect(events).toContainEqual({
+      kind: "summarizer-finished",
+      ok: false,
+      durationMs: expect.any(Number),
+      reason: "spawn failed: E2BIG: argument list too long; no child started",
+    });
   });
 });
 

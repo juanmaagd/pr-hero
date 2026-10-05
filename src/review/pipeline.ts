@@ -350,6 +350,9 @@ export type PipelineProgressEvent =
       // Findings in THIS hunter's draft, pre-dedupe. Absent for a failed step
       // — there is no draft to count.
       drafts?: number;
+      // Why a failed step failed, one short line (see stepFailureReason).
+      // Absent on success, and on a failure that left no witness.
+      reason?: string;
     }
   | { kind: "dedupe-finished"; drafts: number; findings: number }
   | {
@@ -381,6 +384,8 @@ export type PipelineProgressEvent =
       kind: "summarizer-finished";
       ok: boolean;
       durationMs: number;
+      // Same contract as hunter-finished's reason.
+      reason?: string;
     }
   // The scout is the one AWAITED stage between "the run started" and the
   // first hunter spawn, and M4 measured it at 86-600s. Without a started
@@ -408,6 +413,46 @@ export type PipelineProgressEvent =
       maxAttempts: number;
       reason: "transient" | "format";
     };
+
+// The one line a progress renderer prints after "failed" (#314). Born from
+// a CI log that said only "hunter logic: failed" for every hunter while the
+// real cause — E2BIG from an oversized argv — sat in no artifact anyone read.
+// The LAST non-empty line of the witness: a step's stderrTail ends with the
+// most recent thing that went wrong, and the engine's own diagnostics are
+// single lines appended at the end. The "[pr-hero] " tag is dropped because
+// the progress log is already the engine speaking, and the line is capped so
+// one failure cannot flood the log or the panel.
+const FAILURE_REASON_MAX_CHARS = 160;
+
+export function stepFailureReason(witness: string): string | undefined {
+  const lines = witness
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/^\s*\[pr-hero\]\s*/, "")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+    .filter((line) => line.length > 0);
+  const last = lines.at(-1);
+  if (last === undefined) return undefined;
+  return last.length <= FAILURE_REASON_MAX_CHARS
+    ? last
+    : `${last.slice(0, FAILURE_REASON_MAX_CHARS - 1)}…`;
+}
+
+// A runner rejection carries its reason in the error, not in a StepResult.
+function rejectionReason(error: unknown): string | undefined {
+  return stepFailureReason(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+function failureReasonField(
+  reason: string | undefined,
+): { reason: string } | Record<string, never> {
+  return reason === undefined ? {} : { reason };
+}
 
 // A throwing callback is swallowed ON PURPOSE: the review outranks the
 // progress bar, and a cosmetic listener must never be able to kill a paid
@@ -1572,6 +1617,9 @@ async function execute(
           kind: "summarizer-finished",
           ok: result.status === "ok",
           durationMs: Date.now() - startedAt,
+          ...(result.status === "ok"
+            ? {}
+            : failureReasonField(stepFailureReason(result.stderrTail))),
         });
       },
       (error) => {
@@ -1581,6 +1629,7 @@ async function execute(
           kind: "summarizer-finished",
           ok: false,
           durationMs: Date.now() - startedAt,
+          ...failureReasonField(rejectionReason(error)),
         });
       },
     );
@@ -1606,14 +1655,18 @@ async function execute(
             ok: result.status === "ok",
             durationMs: Date.now() - startedAt,
             ...(drafts === undefined ? {} : { drafts }),
+            ...(result.status === "ok"
+              ? {}
+              : failureReasonField(stepFailureReason(result.stderrTail))),
           });
         },
-        () =>
+        (error) =>
           emit(deps, {
             kind: "hunter-finished",
             hunter: key,
             ok: false,
             durationMs: Date.now() - startedAt,
+            ...failureReasonField(rejectionReason(error)),
           }),
       );
       return promise;
