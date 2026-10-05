@@ -449,6 +449,32 @@ describe("ClaudeCodeRunner terminal failure", () => {
   });
 });
 
+// #314: a spawn that throws (E2BIG on an oversized argv, a missing binary)
+// used to reject out of the transport; the harness swallowed it and the step
+// settled `cancelled` with an empty stderrTail, so the run log could only
+// say "failed". It must reach the step result as a failure WITH its reason.
+describe("ClaudeCodeRunner spawn failure", () => {
+  test("a throwing spawn fails the step and carries the reason", async () => {
+    let spawns = 0;
+    const spawnFn = (() => {
+      spawns += 1;
+      throw Object.assign(new Error("argument list too long"), {
+        code: "E2BIG",
+      });
+    }) as unknown as typeof Bun.spawn;
+    const spec = await makeSpec();
+    const stepResult = await new ClaudeCodeRunner({ spawnFn }).run(spec);
+    expect(stepResult.status).toBe("failed");
+    expect(stepResult.stderrTail).toContain("spawn failed");
+    expect(stepResult.stderrTail).toContain("E2BIG");
+    // Pinned as observed, not as policy: the reason matches no transient or
+    // auth witness, so it falls through to the legacy "format" class and gets
+    // its single format-reminder retry, like a prompt-integrity denial.
+    expect(stepResult.attempts).toBe(2);
+    expect(spawns).toBe(2);
+  });
+});
+
 describe("ClaudeCodeRunner watchdog", () => {
   test("kills a hung attempt and recovers on the retry", async () => {
     const { spawnFn, calls } = makeFakeSpawn([

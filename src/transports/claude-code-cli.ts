@@ -779,14 +779,35 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     // 175,865-byte prompt). Never pass both: which one the CLI would honor is
     // unverified, and a positional prompt brings the size bug back. Same
     // channel and reason as gh's report body in pr/pr.ts.
-    const proc = this.spawnFn(args, {
-      cwd: request.cwd,
-      env: request.isolation.env,
-      stdin: new TextEncoder().encode(request.userPrompt),
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
-    }) as unknown as CliProc;
+    //
+    // A synchronous spawn throw (execve refused: E2BIG, ENOENT, EACCES) is a
+    // failed attempt with its reason, not a rejection (#314). Thrown, it
+    // escaped before the try below, the harness swallowed the rejection and
+    // settled the step as cancelled, and the run log said only "failed" —
+    // the E2BIG that killed every hunter was visible nowhere. Nothing was
+    // spawned, so nothing is registered and nothing was spent.
+    let proc: CliProc;
+    try {
+      proc = this.spawnFn(args, {
+        cwd: request.cwd,
+        env: request.isolation.env,
+        stdin: new TextEncoder().encode(request.userPrompt),
+        stdout: "pipe",
+        stderr: "pipe",
+        detached: true,
+      }) as unknown as CliProc;
+    } catch (error) {
+      return {
+        completion: "failed",
+        protocolIntegrity: "unverified",
+        finalText: "",
+        usage: noSpawnUsage(
+          Math.round(performance.now() - start),
+          request.isolation.env,
+        ),
+        stderrTail: `[pr-hero] spawn failed: ${describeSpawnError(error)}; no child started`,
+      };
+    }
 
     ACTIVE_CHILD_PROCS.add(proc);
 
@@ -1031,4 +1052,20 @@ export class ClaudeCodeCliTransport implements ProviderTransport {
     }
     return undefined;
   }
+}
+
+// "<code>: <message>" for a spawn throw, without repeating a code the message
+// already leads with (Bun's system errors often do). A non-Error throw is
+// stringified rather than dropped: the reason is the whole point (#314).
+function describeSpawnError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = (error as { code?: unknown }).code;
+  if (
+    typeof code === "string" &&
+    code !== "" &&
+    !error.message.includes(code)
+  ) {
+    return `${code}: ${error.message}`;
+  }
+  return error.message;
 }

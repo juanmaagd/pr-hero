@@ -1494,3 +1494,67 @@ describe("ClaudeCodeCliTransport prompt delivery and isolation argv (#314)", () 
     expect(args[args.indexOf("--tools") + 1]).toBe("Read");
   });
 });
+
+// #314: Bun.spawn throws synchronously when execve refuses (E2BIG, ENOENT,
+// EACCES). That throw used to escape execute() before its try, the harness
+// swallowed the rejection and settled the step `cancelled`, and the log said
+// only "failed" with no reason anywhere. It is now an ordinary failed outcome
+// that names the error, at genuine zero cost.
+describe("ClaudeCodeCliTransport spawn failure (#314)", () => {
+  function throwingSpawn(error: unknown): typeof Bun.spawn {
+    return (() => {
+      throw error;
+    }) as unknown as typeof Bun.spawn;
+  }
+
+  async function executeWith(error: unknown) {
+    const before = ACTIVE_CHILD_PROCS.size;
+    const transport = new ClaudeCodeCliTransport({
+      ...okPromptFns,
+      spawnFn: throwingSpawn(error),
+      getPgid: (pid) => pid,
+    });
+    const outcome = await transport.execute(makeRequest(), {
+      signal: new AbortController().signal,
+    });
+    return { outcome, registeredDelta: ACTIVE_CHILD_PROCS.size - before };
+  }
+
+  test("a throwing spawn resolves failed with the error code and message", async () => {
+    const error = Object.assign(new Error("argument list too long"), {
+      code: "E2BIG",
+    });
+    const { outcome, registeredDelta } = await executeWith(error);
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.protocolIntegrity).toBe("unverified");
+    expect(outcome.finalText).toBe("");
+    expect(outcome.stderrTail).toBe(
+      "[pr-hero] spawn failed: E2BIG: argument list too long; no child started",
+    );
+    expect(outcome.terminalProof).toBeUndefined();
+    // Nothing was spawned, so nothing may stay registered for the
+    // shutdown sweep to signal.
+    expect(registeredDelta).toBe(0);
+    // No attempt reached the provider: a genuine zero, same as a denial.
+    expect(outcome.usage.cashCostUsd).toBe(0);
+  });
+
+  test("a message that already names the code does not repeat it", async () => {
+    const error = Object.assign(
+      new Error("E2BIG: argument list too long, posix_spawn"),
+      { code: "E2BIG" },
+    );
+    const { outcome } = await executeWith(error);
+    expect(outcome.stderrTail).toBe(
+      "[pr-hero] spawn failed: E2BIG: argument list too long, posix_spawn; no child started",
+    );
+  });
+
+  test("a non-Error throw is still reported, never a crash", async () => {
+    const { outcome } = await executeWith("boom");
+    expect(outcome.completion).toBe("failed");
+    expect(outcome.stderrTail).toBe(
+      "[pr-hero] spawn failed: boom; no child started",
+    );
+  });
+});
