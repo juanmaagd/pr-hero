@@ -422,10 +422,17 @@ export type PipelineProgressEvent =
 // single lines appended at the end. The "[pr-hero] " tag is dropped because
 // the progress log is already the engine speaking, and the line is capped so
 // one failure cannot flood the log or the panel.
+//
+// Redacted FIRST, over the whole witness (PR #315 review F002/F003): the CI
+// line renderer prints this reason, CI logs are public on a public repo, and
+// the witness is raw child stderr. Whole-witness, not per line, because
+// `Bearer\s+\S+` spans a newline — split first, a token alone on the last
+// line would be chosen as the reason unredacted. Before the cap, so the
+// patterns always see each secret whole rather than whatever the cut left.
 const FAILURE_REASON_MAX_CHARS = 160;
 
 export function stepFailureReason(witness: string): string | undefined {
-  const lines = witness
+  const lines = redactFailureText(witness)
     .split("\n")
     .map((line) =>
       line
@@ -2976,14 +2983,20 @@ function recordSettlement(
 // verdict, not whether a session existed.
 const FAILURE_REASON_MAX = 500;
 
+// The two redaction layers every copy of a step's stderr goes through before
+// it leaves the engine — pipeline.json's `failure` below and the progress
+// event's `reason` (stepFailureReason) alike. Same two layers as
+// writeAttemptLog (harness.ts): redactDiagnostic misses Cookie/Authorization
+// headers, secret=, and github_pat_ tokens. One spelling, so the two copies
+// cannot drift apart on what counts as a secret.
+function redactFailureText(raw: string): string {
+  return redactEvidenceText(redactDiagnostic(raw));
+}
+
 function redactFailureReason(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
-  // Same two layers as writeAttemptLog (harness.ts): redactDiagnostic misses
-  // Cookie/Authorization headers, secret=, and github_pat_ tokens, and this
-  // field is now a persisted copy of that same stderr.
-  const redacted = redactEvidenceText(redactDiagnostic(raw))
-    .replace(/\s+/g, " ")
-    .trim();
+  // This field is a persisted copy of that same stderr.
+  const redacted = redactFailureText(raw).replace(/\s+/g, " ").trim();
   const capped = redacted.slice(0, FAILURE_REASON_MAX);
   return capped.length > 0 ? capped : "step failed before its first attempt";
 }

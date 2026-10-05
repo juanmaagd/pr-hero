@@ -27,6 +27,7 @@ import { GOTCHAS_TEMPLATE } from "#review/preflight";
 import type { ScoutLead } from "#review/scout";
 import { defaultReviewSpec } from "#review/spec";
 import type { StepResult, StepRunner, StepSpec } from "#review/step-runner";
+import { startLineRenderer } from "#ui/progress";
 import type { NormalizedUsage } from "../../src/execution/usage-normalized";
 import type { SessionUsage } from "../../src/usage";
 
@@ -3076,6 +3077,155 @@ describe("failure reasons on progress events (#314)", () => {
       durationMs: expect.any(Number),
       reason: "spawn failed: E2BIG: argument list too long; no child started",
     });
+  });
+});
+
+// PR #315 review F002/F003: the reason is printed by the CI line renderer,
+// and CI logs are public on a public repo. It is a copy of child stderr (or
+// a runner error message), so it must pass the same two redaction layers as
+// pipeline.json's `failure` field before it reaches an event. Each secret is
+// asserted ABSENT rather than "[REDACTED]" present: a URL query value is
+// re-serialized percent-encoded, so the literal marker is not a stable probe.
+describe("failure reasons are redacted before they reach an event (#315)", () => {
+  const CASES: { name: string; tail: string; secret: string }[] = [
+    {
+      name: "a Bearer token",
+      tail: "API Error: 401 Bearer abcdef0123456789bearersecret rejected",
+      secret: "abcdef0123456789bearersecret",
+    },
+    {
+      name: "an sk- key",
+      tail: "invalid key sk-live0123456789skkeysecret supplied",
+      secret: "live0123456789skkeysecret",
+    },
+    {
+      name: "an Authorization header",
+      tail: "request failed; Authorization: Basic dXNlcjphdXRoaGVhZGVyc2VjcmV0",
+      secret: "dXNlcjphdXRoaGVhZGVyc2VjcmV0",
+    },
+    {
+      name: "a token in a URL query",
+      tail: "GET https://api.example.com/v1/models?access_token=querytokensecret0123&page=2 failed",
+      secret: "querytokensecret0123",
+    },
+    {
+      // Redaction runs on the WHOLE witness before a line is chosen:
+      // `Bearer\s+\S+` spans the newline, so a per-line pass would leave the
+      // token alone on the last line, where it would be picked as the reason.
+      name: "a Bearer token split across the last newline",
+      tail: "auth failed: Bearer\nsplitlinebearersecret0123",
+      secret: "splitlinebearersecret0123",
+    },
+  ];
+
+  // Plain field reads, not toMatchObject with expect.any(): Bun's
+  // toMatchObject wrote the matcher object INTO the event under test, so a
+  // later JSON.stringify of it no longer held the reason at all.
+  function expectFailedWithReason(
+    event: PipelineProgressEvent | undefined,
+  ): void {
+    expect(event !== undefined && "ok" in event && event.ok).toBe(false);
+    expect(
+      event !== undefined && "reason" in event && typeof event.reason,
+    ).toBe("string");
+  }
+
+  const realWrite = process.stderr.write.bind(process.stderr);
+
+  // The CI line renderer writes through log() → process.stderr.write.
+  function renderLines(events: PipelineProgressEvent[]): string {
+    const written: string[] = [];
+    process.stderr.write = ((chunk: unknown): boolean => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const renderer = startLineRenderer(performance.now());
+      for (const event of events) renderer.onProgress(event);
+    } finally {
+      process.stderr.write = realWrite;
+    }
+    return written.join("");
+  }
+
+  async function failedHunterEvents(
+    resilience: StepRunner["run"],
+  ): Promise<PipelineProgressEvent[]> {
+    const runner: StepRunner = {
+      async run(spec) {
+        if (spec.name === "hunter-resilience") return resilience(spec);
+        return ok(spec, emptyDraft());
+      },
+    };
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    return events;
+  }
+
+  for (const { name, tail, secret } of CASES) {
+    test(`a failed step's stderrTail with ${name}`, async () => {
+      const events = await failedHunterEvents(async (spec) => ({
+        ...failed(spec),
+        stderrTail: tail,
+      }));
+      const resilience = events.find(
+        (e) => e.kind === "hunter-finished" && e.hunter === "resilience",
+      );
+      expectFailedWithReason(resilience);
+      expect(JSON.stringify(resilience)).not.toContain(secret);
+      const rendered = renderLines(events);
+      expect(rendered).toContain("hunter resilience: failed");
+      expect(rendered).not.toContain(secret);
+    });
+
+    test(`a rejected step's error message with ${name}`, async () => {
+      const events = await failedHunterEvents(async () => {
+        throw new Error(tail);
+      });
+      const resilience = events.find(
+        (e) => e.kind === "hunter-finished" && e.hunter === "resilience",
+      );
+      expectFailedWithReason(resilience);
+      expect(JSON.stringify(resilience)).not.toContain(secret);
+      expect(renderLines(events)).not.toContain(secret);
+    });
+  }
+
+  test("a failed summarizer's reason is redacted too", async () => {
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      summarizer: (spec) => ({
+        ...failed(spec),
+        stderrTail: "summarizer died: Bearer summarizerbearersecret0123",
+      }),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(input, {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    const summarizer = events.find((e) => e.kind === "summarizer-finished");
+    expectFailedWithReason(summarizer);
+    expect(JSON.stringify(summarizer)).not.toContain(
+      "summarizerbearersecret0123",
+    );
+    expect(renderLines(events)).not.toContain("summarizerbearersecret0123");
+  });
+
+  test("a secret straddling the 160-char cap leaves no fragment behind", () => {
+    // The cut lands inside the key. Redaction runs first, so the whole key is
+    // already a marker by the time the line is capped.
+    const reason = stepFailureReason(
+      `${"x".repeat(140)} sk-0123456789abcdefcapsecret`,
+    );
+    expect(reason).toBeDefined();
+    expect(reason).not.toContain("0123456789");
   });
 });
 
