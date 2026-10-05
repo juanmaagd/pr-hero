@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   override".
 
 ### Fixed
+- **Patches over 128 KiB can be reviewed on Linux** (#314, 2026-10-05): the Claude Code CLI
+  transport passed the whole user prompt, which embeds the patch, as one argv string. Linux caps a
+  single argv string at 131072 bytes, so on a 175,805-byte patch `execve` failed with `E2BIG` and
+  every hunter failed in seconds without reaching the provider. The prompt now travels on stdin
+  (`claude -p` with no positional prompt). `buildStepArgv` no longer takes a prompt argument.
+- **A failed `claude` spawn reports why** (#314): a spawn that throws (for example `E2BIG`, `ENOENT`)
+  is now a failed attempt whose reason reads `spawn failed: <code>: <message>`, instead of an attempt
+  settled as cancelled with no cause. The progress output prints the reason for a failed hunter or
+  summarizer: `hunter logic: failed — <reason> (the run continues)`.
 - **A CI run that yields to an in-flight review is no longer recorded as a failed admission**
   (2026-10-02): when another pr-hero review (for example a local hook-triggered one) already held a
   `pending` commit status on the PR head, the CI run stood down with exit 0 but left its
