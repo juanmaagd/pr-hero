@@ -2957,6 +2957,42 @@ describe("progress events", () => {
 // ---------------------------------------------------------------------------
 
 describe("stepFailureReason", () => {
+  // PR #315 review F001: the harness appends its own bookkeeping lines AFTER
+  // the transport's tail (harness.ts, isHarnessStderrAnnotation), so the last
+  // line alone can be an annotation instead of the cause. Literal copies on
+  // purpose: a reworded annotation that the predicate stops matching fails
+  // here rather than silently becoming every failed step's "reason".
+  const SPAWN_LINE =
+    "[pr-hero] spawn failed: E2BIG: argument list too long; no child started";
+  const SPAWN_REASON =
+    "spawn failed: E2BIG: argument list too long; no child started";
+  const ANNOTATIONS = [
+    "[pr-hero] credential projection unavailable (missing_subscription_record); child runs with operator environment",
+    "[pr-hero] ambient credential bills metered — this attempt reserves against the spend ledger and fences its bucket if the cost cannot be confirmed",
+    "[pr-hero] credential projection destroy failed",
+  ];
+
+  for (const annotation of ANNOTATIONS) {
+    test(`skips a trailing harness annotation: ${annotation.slice(10, 50)}`, () => {
+      expect(
+        stepFailureReason(`child noise\n${SPAWN_LINE}\n${annotation}`),
+      ).toBe(SPAWN_REASON);
+    });
+  }
+
+  test("skips every annotation stacked in the harness's append order", () => {
+    expect(
+      stepFailureReason(`${SPAWN_LINE}\n${ANNOTATIONS.join("\n")}\n`),
+    ).toBe(SPAWN_REASON);
+  });
+
+  test("a tail of annotations alone has no reason", () => {
+    // None of them is why a step failed — destroy runs after settlement, the
+    // metered note is an accounting claim, the warning describes the child's
+    // env — so surfacing one after "failed —" would misstate the cause.
+    expect(stepFailureReason(ANNOTATIONS.join("\n"))).toBeUndefined();
+  });
+
   test("takes the last non-empty line and drops the engine tag", () => {
     expect(
       stepFailureReason(

@@ -103,6 +103,10 @@ import {
   recordDiversityHunterResult,
 } from "../diversity/pipeline-integration";
 import { writeJsonAtomically } from "../execution/atomic-write";
+// One predicate, owned beside the appends it recognizes. Already in this
+// module's graph through step-runner's value import of the harness, so it
+// adds no weight (the atomic-write WHY above is about a NEW dependency).
+import { isHarnessStderrAnnotation } from "../execution/harness";
 import {
   DEFAULT_CANCELLATION_DEADLINE_MS,
   HARNESS_GRACE_MARGIN_MS,
@@ -429,11 +433,21 @@ export type PipelineProgressEvent =
 // `Bearer\s+\S+` spans a newline — split first, a token alone on the last
 // line would be chosen as the reason unredacted. Before the cap, so the
 // patterns always see each secret whole rather than whatever the cut left.
+//
+// "Last" skips the harness's own bookkeeping lines (PR #315 review F001):
+// the harness appends them AFTER the transport's tail, so the literal last
+// line could be "ambient credential bills metered ..." while the E2BIG sat
+// one line above. Filtered before the tag is dropped, because the predicate
+// matches whole annotated lines. A tail of annotations ALONE yields no
+// reason rather than an annotation: none of them is why a step failed, and
+// "failed — credential projection destroy failed" would name a cleanup step
+// as the cause. No reason prints the plain "failed" wording instead.
 const FAILURE_REASON_MAX_CHARS = 160;
 
 export function stepFailureReason(witness: string): string | undefined {
   const lines = redactFailureText(witness)
     .split("\n")
+    .filter((line) => !isHarnessStderrAnnotation(line))
     .map((line) =>
       line
         .replace(/^\s*\[pr-hero\]\s*/, "")

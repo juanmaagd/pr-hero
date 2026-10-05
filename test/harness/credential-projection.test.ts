@@ -8,7 +8,10 @@ import type {
   TransportOutcome,
   TransportRequest,
 } from "../../src/execution/contracts";
-import { StepExecutionHarness } from "../../src/execution/harness";
+import {
+  isHarnessStderrAnnotation,
+  StepExecutionHarness,
+} from "../../src/execution/harness";
 import {
   InMemorySpendLedger,
   type ReserveSpendInput,
@@ -17,6 +20,7 @@ import {
   type SpendReservation,
 } from "../../src/execution/spend-limiter";
 import { envBillsMetered } from "../../src/execution/usage-normalized";
+import { stepFailureReason } from "../../src/review/pipeline";
 import {
   credentialKindBillsMetered,
   credentialKindForRoute,
@@ -634,6 +638,94 @@ describe("harness with a CredentialBroker", () => {
     expect(result.stderrTail).toContain(
       "[pr-hero] credential projection destroy failed",
     );
+  });
+});
+
+// PR #315 review F001: the progress reason (pipeline.ts stepFailureReason)
+// reads a step's stderrTail AFTER the harness has appended its bookkeeping
+// lines. These drive the harness's REAL appends — not literal copies — so a
+// reworded annotation the predicate stops matching fails here.
+describe("progress reason over the harness's real annotations", () => {
+  const SPAWN_LINE =
+    "[pr-hero] spawn failed: E2BIG: argument list too long; no child started";
+
+  test("a degraded, metered failed step still reports the transport's cause", async () => {
+    const harness = new StepExecutionHarness({
+      transport: {
+        backend: "claude-code",
+        capabilities: async () => {
+          throw new Error("not used");
+        },
+        classifyFailure: () => undefined,
+        async execute() {
+          return {
+            completion: "failed",
+            protocolIntegrity: "unverified",
+            finalText: "",
+            usage: {
+              wallMs: 0,
+              tokens: {},
+              completeness: "complete",
+              billingMode: "metered",
+              costSource: "provider",
+              cashCostUsd: 0,
+            },
+            stderrTail: SPAWN_LINE,
+          } satisfies TransportOutcome;
+        },
+      },
+      spawnFn: (() => ({
+        exited: Promise.resolve(0),
+      })) as unknown as typeof Bun.spawn,
+      // An ambient metered key, so the degraded attempt opens a reservation
+      // and the harness appends its metered note too (#279).
+      childEnv: {
+        HOME: "/Users/juanma-real-home",
+        PATH: "/usr/bin:/bin",
+        ANTHROPIC_API_KEY: "sk-ambient-operator-key",
+      },
+      credentialBroker: new FakeBroker(
+        new CredentialProjectionError("missing_subscription_record"),
+      ),
+      spendLedger: new SpyLedger(),
+      reservesSpend: false,
+      degradedProjectionBucketId: "mirrored-metered-bucket",
+    });
+    const result = await runStep(harness);
+    expect(result.status).toBe("failed");
+    // Precondition: the tail really does END in harness annotations, so the
+    // assertion below discriminates — a "last line" reader would fail it.
+    const lines = result.stderrTail.split("\n");
+    expect(lines.at(-1)).toStartWith(
+      "[pr-hero] ambient credential bills metered",
+    );
+    expect(lines.at(-2)).toStartWith(
+      "[pr-hero] credential projection unavailable (missing_subscription_record)",
+    );
+    expect(lines.filter(isHarnessStderrAnnotation)).toHaveLength(2);
+    expect(stepFailureReason(result.stderrTail)).toBe(
+      "spawn failed: E2BIG: argument list too long; no child started",
+    );
+  });
+
+  // A successful transport with an EMPTY tail, so the reading below holds
+  // whether or not the destroy-failure append duplicates the existing tail.
+  test("a destroy-failure annotation is never itself a reason", async () => {
+    const broker = new FakeBroker();
+    const harness = makeHarness(recordingTransport([]), broker);
+    const original = broker.project.bind(broker);
+    broker.project = async (input) => {
+      const projection = await original(input);
+      projection.destroy = async () => {
+        throw new Error("EBUSY sabotage");
+      };
+      return projection;
+    };
+    const result = await runStep(harness);
+    const lines = result.stderrTail.split("\n").filter((l) => l.trim() !== "");
+    expect(lines.at(-1)).toBe("[pr-hero] credential projection destroy failed");
+    expect(lines.every(isHarnessStderrAnnotation)).toBe(true);
+    expect(stepFailureReason(result.stderrTail)).toBeUndefined();
   });
 });
 
