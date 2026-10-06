@@ -103,6 +103,10 @@ import {
   recordDiversityHunterResult,
 } from "../diversity/pipeline-integration";
 import { writeJsonAtomically } from "../execution/atomic-write";
+// One predicate, owned beside the appends it recognizes. Already in this
+// module's graph through step-runner's value import of the harness, so it
+// adds no weight (the atomic-write WHY above is about a NEW dependency).
+import { isHarnessStderrAnnotation } from "../execution/harness";
 import {
   DEFAULT_CANCELLATION_DEADLINE_MS,
   HARNESS_GRACE_MARGIN_MS,
@@ -350,6 +354,9 @@ export type PipelineProgressEvent =
       // Findings in THIS hunter's draft, pre-dedupe. Absent for a failed step
       // — there is no draft to count.
       drafts?: number;
+      // Why a failed step failed, one short line (see stepFailureReason).
+      // Absent on success, and on a failure that left no witness.
+      reason?: string;
     }
   | { kind: "dedupe-finished"; drafts: number; findings: number }
   | {
@@ -381,6 +388,8 @@ export type PipelineProgressEvent =
       kind: "summarizer-finished";
       ok: boolean;
       durationMs: number;
+      // Same contract as hunter-finished's reason.
+      reason?: string;
     }
   // The scout is the one AWAITED stage between "the run started" and the
   // first hunter spawn, and M4 measured it at 86-600s. Without a started
@@ -408,6 +417,63 @@ export type PipelineProgressEvent =
       maxAttempts: number;
       reason: "transient" | "format";
     };
+
+// The one line a progress renderer prints after "failed" (#314). Born from
+// a CI log that said only "hunter logic: failed" for every hunter while the
+// real cause — E2BIG from an oversized argv — sat in no artifact anyone read.
+// The LAST non-empty line of the witness: a step's stderrTail ends with the
+// most recent thing that went wrong, and the engine's own diagnostics are
+// single lines appended at the end. The "[pr-hero] " tag is dropped because
+// the progress log is already the engine speaking, and the line is capped so
+// one failure cannot flood the log or the panel.
+//
+// Redacted FIRST, over the whole witness (PR #315 review F002/F003): the CI
+// line renderer prints this reason, CI logs are public on a public repo, and
+// the witness is raw child stderr. Whole-witness, not per line, because
+// `Bearer\s+\S+` spans a newline — split first, a token alone on the last
+// line would be chosen as the reason unredacted. Before the cap, so the
+// patterns always see each secret whole rather than whatever the cut left.
+//
+// "Last" skips the harness's own bookkeeping lines (PR #315 review F001):
+// the harness appends them AFTER the transport's tail, so the literal last
+// line could be "ambient credential bills metered ..." while the E2BIG sat
+// one line above. Filtered before the tag is dropped, because the predicate
+// matches whole annotated lines. A tail of annotations ALONE yields no
+// reason rather than an annotation: none of them is why a step failed, and
+// "failed — credential projection destroy failed" would name a cleanup step
+// as the cause. No reason prints the plain "failed" wording instead.
+const FAILURE_REASON_MAX_CHARS = 160;
+
+export function stepFailureReason(witness: string): string | undefined {
+  const lines = redactFailureText(witness)
+    .split("\n")
+    .filter((line) => !isHarnessStderrAnnotation(line))
+    .map((line) =>
+      line
+        .replace(/^\s*\[pr-hero\]\s*/, "")
+        .replace(/\s+/g, " ")
+        .trim(),
+    )
+    .filter((line) => line.length > 0);
+  const last = lines.at(-1);
+  if (last === undefined) return undefined;
+  return last.length <= FAILURE_REASON_MAX_CHARS
+    ? last
+    : `${last.slice(0, FAILURE_REASON_MAX_CHARS - 1)}…`;
+}
+
+// A runner rejection carries its reason in the error, not in a StepResult.
+function rejectionReason(error: unknown): string | undefined {
+  return stepFailureReason(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+function failureReasonField(
+  reason: string | undefined,
+): { reason: string } | Record<string, never> {
+  return reason === undefined ? {} : { reason };
+}
 
 // A throwing callback is swallowed ON PURPOSE: the review outranks the
 // progress bar, and a cosmetic listener must never be able to kill a paid
@@ -1572,6 +1638,9 @@ async function execute(
           kind: "summarizer-finished",
           ok: result.status === "ok",
           durationMs: Date.now() - startedAt,
+          ...(result.status === "ok"
+            ? {}
+            : failureReasonField(stepFailureReason(result.stderrTail))),
         });
       },
       (error) => {
@@ -1581,6 +1650,7 @@ async function execute(
           kind: "summarizer-finished",
           ok: false,
           durationMs: Date.now() - startedAt,
+          ...failureReasonField(rejectionReason(error)),
         });
       },
     );
@@ -1606,14 +1676,18 @@ async function execute(
             ok: result.status === "ok",
             durationMs: Date.now() - startedAt,
             ...(drafts === undefined ? {} : { drafts }),
+            ...(result.status === "ok"
+              ? {}
+              : failureReasonField(stepFailureReason(result.stderrTail))),
           });
         },
-        () =>
+        (error) =>
           emit(deps, {
             kind: "hunter-finished",
             hunter: key,
             ok: false,
             durationMs: Date.now() - startedAt,
+            ...failureReasonField(rejectionReason(error)),
           }),
       );
       return promise;
@@ -2923,14 +2997,20 @@ function recordSettlement(
 // verdict, not whether a session existed.
 const FAILURE_REASON_MAX = 500;
 
+// The two redaction layers every copy of a step's stderr goes through before
+// it leaves the engine — pipeline.json's `failure` below and the progress
+// event's `reason` (stepFailureReason) alike. Same two layers as
+// writeAttemptLog (harness.ts): redactDiagnostic misses Cookie/Authorization
+// headers, secret=, and github_pat_ tokens. One spelling, so the two copies
+// cannot drift apart on what counts as a secret.
+function redactFailureText(raw: string): string {
+  return redactEvidenceText(redactDiagnostic(raw));
+}
+
 function redactFailureReason(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
-  // Same two layers as writeAttemptLog (harness.ts): redactDiagnostic misses
-  // Cookie/Authorization headers, secret=, and github_pat_ tokens, and this
-  // field is now a persisted copy of that same stderr.
-  const redacted = redactEvidenceText(redactDiagnostic(raw))
-    .replace(/\s+/g, " ")
-    .trim();
+  // This field is a persisted copy of that same stderr.
+  const redacted = redactFailureText(raw).replace(/\s+/g, " ").trim();
   const capped = redacted.slice(0, FAILURE_REASON_MAX);
   return capped.length > 0 ? capped : "step failed before its first attempt";
 }

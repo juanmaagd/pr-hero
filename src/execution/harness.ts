@@ -390,6 +390,40 @@ function notifyRetry(step: StepSpec, info: RetryInfo): void {
   }
 }
 
+// The harness's own bookkeeping lines, appended to a step's stderrTail AFTER
+// the transport's tail (see run()). They report facts ABOUT the attempt —
+// a degraded credential projection, metered accounting, a failed cleanup —
+// and none of them is why a step failed. PR #315 review F001: the progress
+// reason (pipeline.ts stepFailureReason) reads the LAST line of the tail, so
+// without a way to recognize these it printed "failed — ambient credential
+// bills metered ..." instead of the E2BIG above it. Spelled once here and
+// used at every append site, so the producer and the predicate cannot drift.
+// The transport's own diagnostics share the "[pr-hero] " tag ("spawn failed:
+// ...; no child started"), which is why the predicate matches whole lines
+// and never the tag alone.
+const DESTROY_FAILED_ANNOTATION =
+  "[pr-hero] credential projection destroy failed";
+const AMBIENT_METERED_ANNOTATION =
+  "[pr-hero] ambient credential bills metered — this attempt reserves against the spend ledger and fences its bucket if the cost cannot be confirmed";
+// The class is variable in the shape even though only
+// missing_subscription_record reaches the append today: the shape is what
+// the harness writes, the class list is a policy that may grow.
+const PROJECTION_WARNING_ANNOTATION =
+  /^\[pr-hero\] credential projection unavailable \([a-z_]+\); child runs with operator environment$/;
+
+function projectionWarningAnnotation(failureClass: string): string {
+  return `[pr-hero] credential projection unavailable (${failureClass}); child runs with operator environment`;
+}
+
+export function isHarnessStderrAnnotation(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    trimmed === DESTROY_FAILED_ANNOTATION ||
+    trimmed === AMBIENT_METERED_ANNOTATION ||
+    PROJECTION_WARNING_ANNOTATION.test(trimmed)
+  );
+}
+
 // Settlement receipts are named on BOTH axes — step name and attempt — and the
 // name is derived from the runner contract's single builder so the writer and
 // every message that points a human at the file cannot drift apart (a hardcoded
@@ -891,7 +925,7 @@ export class StepExecutionHarness implements StepRunner {
           };
         }
         projection = undefined;
-        projectionWarning = `credential projection unavailable (${failureClass}); child runs with operator environment`;
+        projectionWarning = projectionWarningAnnotation(failureClass);
       }
     }
 
@@ -938,7 +972,7 @@ export class StepExecutionHarness implements StepRunner {
         result,
       );
       if (projectionWarning !== undefined) {
-        result.stderrTail = `${result.stderrTail}\n[pr-hero] ${projectionWarning}`;
+        result.stderrTail = `${result.stderrTail}\n${projectionWarning}`;
       }
       // #279 (pr-hero review follow-up): a metered-accounting CLAIM, so it
       // must only be made once a reservation ACTUALLY opened — never from
@@ -962,7 +996,7 @@ export class StepExecutionHarness implements StepRunner {
         result.reservations !== undefined &&
         result.reservations.length > 0
       ) {
-        result.stderrTail = `${result.stderrTail}\n[pr-hero] ambient credential bills metered — this attempt reserves against the spend ledger and fences its bucket if the cost cannot be confirmed`;
+        result.stderrTail = `${result.stderrTail}\n${AMBIENT_METERED_ANNOTATION}`;
       }
       return result;
     } catch (error) {
@@ -1008,7 +1042,7 @@ export class StepExecutionHarness implements StepRunner {
     result?: StepResult,
   ): void {
     if (!destroyFailed) return;
-    const line = "[pr-hero] credential projection destroy failed";
+    const line = DESTROY_FAILED_ANNOTATION;
     if (result !== undefined) {
       result.stderrTail += `${result.stderrTail}\n${line}`;
     }

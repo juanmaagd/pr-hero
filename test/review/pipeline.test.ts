@@ -21,11 +21,13 @@ import {
   parityTriggered,
   RUNTIME_PREAMBLE,
   runPipeline,
+  stepFailureReason,
 } from "#review/pipeline";
 import { GOTCHAS_TEMPLATE } from "#review/preflight";
 import type { ScoutLead } from "#review/scout";
 import { defaultReviewSpec } from "#review/spec";
 import type { StepResult, StepRunner, StepSpec } from "#review/step-runner";
+import { startLineRenderer } from "#ui/progress";
 import type { NormalizedUsage } from "../../src/execution/usage-normalized";
 import type { SessionUsage } from "../../src/usage";
 
@@ -746,6 +748,8 @@ describe("engine-owned summarizer", () => {
       kind: "summarizer-finished",
       ok: false,
       durationMs: expect.any(Number),
+      // #314: a rejection's reason is its error message.
+      reason: "summarizer process rejected",
     });
   });
 
@@ -2945,6 +2949,319 @@ describe("progress events", () => {
     expect(result.skillOutput.run_status).toBe("complete");
     expect(result.sessionFailed).toBe(false);
     expect(result.skillOutput.findings).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #314 — a failed step's reason reaches the progress events
+// ---------------------------------------------------------------------------
+
+describe("stepFailureReason", () => {
+  // PR #315 review F001: the harness appends its own bookkeeping lines AFTER
+  // the transport's tail (harness.ts, isHarnessStderrAnnotation), so the last
+  // line alone can be an annotation instead of the cause. Literal copies on
+  // purpose: a reworded annotation that the predicate stops matching fails
+  // here rather than silently becoming every failed step's "reason".
+  const SPAWN_LINE =
+    "[pr-hero] spawn failed: E2BIG: argument list too long; no child started";
+  const SPAWN_REASON =
+    "spawn failed: E2BIG: argument list too long; no child started";
+  const ANNOTATIONS = [
+    "[pr-hero] credential projection unavailable (missing_subscription_record); child runs with operator environment",
+    "[pr-hero] ambient credential bills metered — this attempt reserves against the spend ledger and fences its bucket if the cost cannot be confirmed",
+    "[pr-hero] credential projection destroy failed",
+  ];
+
+  for (const annotation of ANNOTATIONS) {
+    test(`skips a trailing harness annotation: ${annotation.slice(10, 50)}`, () => {
+      expect(
+        stepFailureReason(`child noise\n${SPAWN_LINE}\n${annotation}`),
+      ).toBe(SPAWN_REASON);
+    });
+  }
+
+  test("skips every annotation stacked in the harness's append order", () => {
+    expect(
+      stepFailureReason(`${SPAWN_LINE}\n${ANNOTATIONS.join("\n")}\n`),
+    ).toBe(SPAWN_REASON);
+  });
+
+  test("a tail of annotations alone has no reason", () => {
+    // None of them is why a step failed — destroy runs after settlement, the
+    // metered note is an accounting claim, the warning describes the child's
+    // env — so surfacing one after "failed —" would misstate the cause.
+    expect(stepFailureReason(ANNOTATIONS.join("\n"))).toBeUndefined();
+  });
+
+  test("takes the last non-empty line and drops the engine tag", () => {
+    expect(
+      stepFailureReason(
+        "child noise\n[pr-hero] spawn failed: E2BIG: argument list too long; no child started\n\n",
+      ),
+    ).toBe("spawn failed: E2BIG: argument list too long; no child started");
+  });
+
+  test("collapses whitespace runs to one space", () => {
+    expect(stepFailureReason("API Error:\t 529   overloaded_error")).toBe(
+      "API Error: 529 overloaded_error",
+    );
+  });
+
+  test("an empty or blank witness has no reason", () => {
+    expect(stepFailureReason("")).toBeUndefined();
+    expect(stepFailureReason(" \n\t\n")).toBeUndefined();
+    expect(stepFailureReason("[pr-hero]   ")).toBeUndefined();
+  });
+
+  test("a long line is capped at 160 characters with an ellipsis", () => {
+    const reason = stepFailureReason("x".repeat(500));
+    expect(reason).toHaveLength(160);
+    expect(reason?.endsWith("…")).toBe(true);
+    expect(stepFailureReason("y".repeat(160))).toBe("y".repeat(160));
+  });
+});
+
+describe("failure reasons on progress events (#314)", () => {
+  const SPAWN_FAILED =
+    "[pr-hero] spawn failed: E2BIG: argument list too long; no child started";
+
+  function finishedHunters(
+    events: PipelineProgressEvent[],
+  ): Extract<PipelineProgressEvent, { kind: "hunter-finished" }>[] {
+    return events.filter((e) => e.kind === "hunter-finished") as Extract<
+      PipelineProgressEvent,
+      { kind: "hunter-finished" }
+    >[];
+  }
+
+  test("a failed hunter step carries its stderrTail's last line; a done one carries none", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) => ok(spec, { findings: [draft()] }),
+      "hunter-resilience": (spec) => ({
+        ...failed(spec),
+        stderrTail: `earlier noise\n${SPAWN_FAILED}`,
+      }),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    const byHunter = new Map(finishedHunters(events).map((e) => [e.hunter, e]));
+    expect(byHunter.get("resilience")?.ok).toBe(false);
+    expect(byHunter.get("resilience")?.reason).toBe(
+      "spawn failed: E2BIG: argument list too long; no child started",
+    );
+    expect(byHunter.get("reliability")?.ok).toBe(true);
+    expect(byHunter.get("reliability")).not.toHaveProperty("reason");
+  });
+
+  test("a failed step with an empty stderrTail emits no reason key at all", async () => {
+    const runner = new FakeStepRunner({
+      "hunter-reliability": (spec) => ok(spec, emptyDraft()),
+      "hunter-resilience": (spec) => ({ ...failed(spec), stderrTail: "" }),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    const resilience = finishedHunters(events).find(
+      (e) => e.hunter === "resilience",
+    );
+    expect(resilience?.ok).toBe(false);
+    expect(resilience).not.toHaveProperty("reason");
+  });
+
+  test("a rejected hunter step carries the error message", async () => {
+    const runner: StepRunner = {
+      async run(spec) {
+        if (spec.name === "hunter-resilience") {
+          throw new Error("runner exploded\nwith a second line");
+        }
+        return ok(spec, emptyDraft());
+      },
+    };
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    const resilience = finishedHunters(events).find(
+      (e) => e.hunter === "resilience",
+    );
+    expect(resilience?.ok).toBe(false);
+    expect(resilience?.reason).toBe("with a second line");
+  });
+
+  test("a failed summarizer step carries its reason", async () => {
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      summarizer: (spec) => ({ ...failed(spec), stderrTail: SPAWN_FAILED }),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(input, {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    expect(events).toContainEqual({
+      kind: "summarizer-finished",
+      ok: false,
+      durationMs: expect.any(Number),
+      reason: "spawn failed: E2BIG: argument list too long; no child started",
+    });
+  });
+});
+
+// PR #315 review F002/F003: the reason is printed by the CI line renderer,
+// and CI logs are public on a public repo. It is a copy of child stderr (or
+// a runner error message), so it must pass the same two redaction layers as
+// pipeline.json's `failure` field before it reaches an event. Each secret is
+// asserted ABSENT rather than "[REDACTED]" present: a URL query value is
+// re-serialized percent-encoded, so the literal marker is not a stable probe.
+describe("failure reasons are redacted before they reach an event (#315)", () => {
+  const CASES: { name: string; tail: string; secret: string }[] = [
+    {
+      name: "a Bearer token",
+      tail: "API Error: 401 Bearer abcdef0123456789bearersecret rejected",
+      secret: "abcdef0123456789bearersecret",
+    },
+    {
+      name: "an sk- key",
+      tail: "invalid key sk-live0123456789skkeysecret supplied",
+      secret: "live0123456789skkeysecret",
+    },
+    {
+      name: "an Authorization header",
+      tail: "request failed; Authorization: Basic dXNlcjphdXRoaGVhZGVyc2VjcmV0",
+      secret: "dXNlcjphdXRoaGVhZGVyc2VjcmV0",
+    },
+    {
+      name: "a token in a URL query",
+      tail: "GET https://api.example.com/v1/models?access_token=querytokensecret0123&page=2 failed",
+      secret: "querytokensecret0123",
+    },
+    {
+      // Redaction runs on the WHOLE witness before a line is chosen:
+      // `Bearer\s+\S+` spans the newline, so a per-line pass would leave the
+      // token alone on the last line, where it would be picked as the reason.
+      name: "a Bearer token split across the last newline",
+      tail: "auth failed: Bearer\nsplitlinebearersecret0123",
+      secret: "splitlinebearersecret0123",
+    },
+  ];
+
+  // Plain field reads, not toMatchObject with expect.any(): Bun's
+  // toMatchObject wrote the matcher object INTO the event under test, so a
+  // later JSON.stringify of it no longer held the reason at all.
+  function expectFailedWithReason(
+    event: PipelineProgressEvent | undefined,
+  ): void {
+    expect(event !== undefined && "ok" in event && event.ok).toBe(false);
+    expect(
+      event !== undefined && "reason" in event && typeof event.reason,
+    ).toBe("string");
+  }
+
+  const realWrite = process.stderr.write.bind(process.stderr);
+
+  // The CI line renderer writes through log() → process.stderr.write.
+  function renderLines(events: PipelineProgressEvent[]): string {
+    const written: string[] = [];
+    process.stderr.write = ((chunk: unknown): boolean => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const renderer = startLineRenderer(performance.now());
+      for (const event of events) renderer.onProgress(event);
+    } finally {
+      process.stderr.write = realWrite;
+    }
+    return written.join("");
+  }
+
+  async function failedHunterEvents(
+    resilience: StepRunner["run"],
+  ): Promise<PipelineProgressEvent[]> {
+    const runner: StepRunner = {
+      async run(spec) {
+        if (spec.name === "hunter-resilience") return resilience(spec);
+        return ok(spec, emptyDraft());
+      },
+    };
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(await makeInput(), {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    return events;
+  }
+
+  for (const { name, tail, secret } of CASES) {
+    test(`a failed step's stderrTail with ${name}`, async () => {
+      const events = await failedHunterEvents(async (spec) => ({
+        ...failed(spec),
+        stderrTail: tail,
+      }));
+      const resilience = events.find(
+        (e) => e.kind === "hunter-finished" && e.hunter === "resilience",
+      );
+      expectFailedWithReason(resilience);
+      expect(JSON.stringify(resilience)).not.toContain(secret);
+      const rendered = renderLines(events);
+      expect(rendered).toContain("hunter resilience: failed");
+      expect(rendered).not.toContain(secret);
+    });
+
+    test(`a rejected step's error message with ${name}`, async () => {
+      const events = await failedHunterEvents(async () => {
+        throw new Error(tail);
+      });
+      const resilience = events.find(
+        (e) => e.kind === "hunter-finished" && e.hunter === "resilience",
+      );
+      expectFailedWithReason(resilience);
+      expect(JSON.stringify(resilience)).not.toContain(secret);
+      expect(renderLines(events)).not.toContain(secret);
+    });
+  }
+
+  test("a failed summarizer's reason is redacted too", async () => {
+    const input = await makeInput({
+      summarizer: { promptPath: BUNDLED_SUMMARIZER_PROMPT },
+    });
+    const runner = new FakeStepRunner({
+      ...HUNTERS_OK,
+      summarizer: (spec) => ({
+        ...failed(spec),
+        stderrTail: "summarizer died: Bearer summarizerbearersecret0123",
+      }),
+    });
+    const events: PipelineProgressEvent[] = [];
+    await runPipeline(input, {
+      runner,
+      onProgress: (event) => events.push(event),
+    });
+    const summarizer = events.find((e) => e.kind === "summarizer-finished");
+    expectFailedWithReason(summarizer);
+    expect(JSON.stringify(summarizer)).not.toContain(
+      "summarizerbearersecret0123",
+    );
+    expect(renderLines(events)).not.toContain("summarizerbearersecret0123");
+  });
+
+  test("a secret straddling the 160-char cap leaves no fragment behind", () => {
+    // The cut lands inside the key. Redaction runs first, so the whole key is
+    // already a marker by the time the line is capped.
+    const reason = stepFailureReason(
+      `${"x".repeat(140)} sk-0123456789abcdefcapsecret`,
+    );
+    expect(reason).toBeDefined();
+    expect(reason).not.toContain("0123456789");
   });
 });
 

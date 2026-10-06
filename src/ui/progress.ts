@@ -138,6 +138,16 @@ export function startPanelRenderer(
   };
 }
 
+// "done", or the honest failure with its reason when the pipeline had one
+// (#314: a CI log that said only "failed" for every hunter hid an E2BIG). A
+// failed hunter or summarizer is a partial run, never an abort.
+function finishedText(event: { ok: boolean; reason?: string }): string {
+  if (event.ok) return "done";
+  return event.reason === undefined
+    ? "failed (the run continues)"
+    : `failed — ${event.reason} (the run continues)`;
+}
+
 // Non-TTY: no redraw art, one plain line per event, elapsed prefix.
 export function startLineRenderer(startedAtMs: number): ProgressRenderer {
   const line = (text: string): void => {
@@ -153,10 +163,7 @@ export function startLineRenderer(startedAtMs: number): ProgressRenderer {
         case "hunter-finished":
           // A failed hunter is honest, not alarming: one dead hunter is a
           // partial run, never an abort.
-          line(
-            `hunter ${event.hunter}: ` +
-              (event.ok ? "done" : "failed (the run continues)"),
-          );
+          line(`hunter ${event.hunter}: ${finishedText(event)}`);
           return;
         case "dedupe-finished":
           line(
@@ -183,9 +190,7 @@ export function startLineRenderer(startedAtMs: number): ProgressRenderer {
           line(`verify ${event.findingId}: ${event.verdict}`);
           return;
         case "summarizer-finished":
-          line(
-            `summarizer: ${event.ok ? "done" : "failed (the run continues)"}`,
-          );
+          line(`summarizer: ${finishedText(event)}`);
           return;
         case "scout-started":
           line(`scout: reading the diff (${event.model})`);
