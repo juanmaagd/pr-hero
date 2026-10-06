@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-07
+
 ### Added
 - **`full` action input and `full` force-dispatch input**: the action passes `--full` when `full` is
   `'true'`, and `pr-hero-force.yml` (the scaffolded template and this repository's own) gains a
@@ -279,7 +281,8 @@ above). `0.1.0` below was originally published as `v1.0.0`._
 - **Spend & Size Safety Gates**: Automated budget guards (`max-changed-lines`, `max-changed-files`, `budget-usd`) skipping oversized or cost-prohibitive PRs cleanly with explicit skip status annotations.
 - **CI Automated Scaffolding**: `pr-hero setup --ci` and `pr-hero ci init` commands generating byte-accurate `.github/workflows/pr-hero.yml` configurations, complemented by the `pr-hero-ci-setup` agent skill.
 
-[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/juanmaagd/pr-hero/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/juanmaagd/pr-hero/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/juanmaagd/pr-hero/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/juanmaagd/pr-hero/compare/v1.1.0...v0.2.0
 [0.1.1]: https://github.com/juanmaagd/pr-hero/releases/tag/v1.1.0
